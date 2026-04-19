@@ -22,9 +22,20 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
-                arguments += listOf("-DANDROID_STL=c++_shared")
+                arguments += listOf(
+                    "-DANDROID_STL=c++_shared",
+                    // TODO(phase-2 follow-up): flip to ON once libplist is vendored.
+                    // OpenSSL is wired via the prefab AAR; libplist is the remaining
+                    // dep blocker for compiling native/libairplay/lib/.
+                    "-DTARMAC_LINK_LIBAIRPLAY=OFF"
+                )
             }
         }
+    }
+
+    buildFeatures {
+        viewBinding = true
+        prefab = true
     }
 
     buildTypes {
@@ -53,10 +64,6 @@ android {
         }
     }
 
-    buildFeatures {
-        viewBinding = true
-    }
-
     packaging {
         resources.excludes += listOf(
             "META-INF/LICENSE*",
@@ -75,4 +82,8 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.ui)
+
+    // Prefab AAR providing OpenSSL 1.1.1q for Android NDK (libcrypto + libssl).
+    // Consumed via CMake `find_package(openssl REQUIRED CONFIG)`.
+    implementation(libs.ndk.openssl)
 }

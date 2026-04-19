@@ -4,10 +4,15 @@ project(tarmac_native LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
-# Phase 1: stub-only native library (JNI entry points + renderer placeholders).
-# Phase 2 will turn on -DTARMAC_LINK_LIBAIRPLAY=ON and compile the UxPlay lib/,
-# which requires vendored OpenSSL for Android and excludes dnssd.c (NsdManager
-# handles Bonjour on the Java side).
+# Phase 2: OpenSSL is now provided by the prefab AAR
+# `com.android.ndk.thirdparty:openssl` (declared in app/build.gradle.kts).
+# The Android Gradle Plugin exposes its prefab packages on CMAKE_FIND_ROOT_PATH
+# automatically when buildFeatures.prefab = true is set.
+#
+# TARMAC_LINK_LIBAIRPLAY pulls UxPlay's RAOP/RTSP server sources into the JNI
+# library. It currently still requires libplist (libimobiledevice/libplist),
+# which has not been vendored yet. Until then this stays OFF and the JNI
+# bridge compiles against stubs only.
 option(TARMAC_LINK_LIBAIRPLAY "Compile UxPlay protocol sources into the JNI lib" OFF)
 
 add_library(tarmac-native SHARED
@@ -15,6 +20,11 @@ add_library(tarmac-native SHARED
     android_video_renderer.cpp
     android_audio_renderer.cpp
 )
+
+# OpenSSL prefab — always wired so crypto is ready as soon as libairplay is on.
+find_package(openssl REQUIRED CONFIG)
+target_link_libraries(tarmac-native openssl::crypto openssl::ssl)
+target_compile_definitions(tarmac-native PRIVATE OPENSSL_API_COMPAT=0x10101000L)
 
 if(TARMAC_LINK_LIBAIRPLAY)
     set(LIBAIRPLAY_DIR ${CMAKE_SOURCE_DIR}/../../../../native/libairplay/lib)
@@ -31,8 +41,12 @@ if(TARMAC_LINK_LIBAIRPLAY)
         ${LIBAIRPLAY_DIR}/llhttp
         ${LIBAIRPLAY_DIR}/playfair
     )
-    target_compile_definitions(tarmac-native PRIVATE HAVE_LIBAIRPLAY=1)
-    # OpenSSL for Android must be wired here in Phase 2 (prefab or vendored prebuilts).
+    target_compile_definitions(tarmac-native PRIVATE
+        HAVE_LIBAIRPLAY=1
+        NOHOLD=1
+    )
+    # libplist must be wired here when vendored — see CMake TODO above.
+    # find_package(plist REQUIRED CONFIG) or add_subdirectory of vendored copy.
 endif()
 
 find_library(log-lib log)
