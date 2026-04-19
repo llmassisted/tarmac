@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Tarmac</string>
+    <string name="status_header">AirPlay</string>
+    <string name="service_channel_name">Tarmac AirPlay service</string>
+    <string name="service_running">Ready for AirPlay</string>
+</resources>
