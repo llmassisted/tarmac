@@ -5,12 +5,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
+import com.tarmac.MirrorActivity
 import com.tarmac.R
 import com.tarmac.media.AudioPipeline
 import kotlin.random.Random
@@ -32,7 +34,20 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
 
     override fun onCreate() {
         super.onCreate()
-        startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.service_running)))
+        val notification = buildNotification(getString(R.string.service_running))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Android 10+ supports typed startForeground; Android 14 (API 34)
+            // *requires* it and throws MissingForegroundServiceTypeException
+            // otherwise. `mediaPlayback` also has to be declared in the
+            // manifest <service> entry and backed by the matching permission.
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -102,15 +117,24 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
 
     override fun onSessionState(state: AirPlayJni.SessionState) {
         sessionState = state
-        // MirrorActivity launching is wired in MainFragment / a session bus in
-        // a follow-up commit. For now the notification reflects the state so
-        // QA can see the handshake completed.
         updateNotification(
             when (state) {
                 AirPlayJni.SessionState.ACTIVE -> "Streaming from client"
                 AirPlayJni.SessionState.IDLE -> getString(R.string.service_running) + " — PIN $currentPin"
             }
         )
+        when (state) {
+            AirPlayJni.SessionState.ACTIVE -> launchMirrorActivity()
+            AirPlayJni.SessionState.IDLE -> Unit
+        }
+    }
+
+    private fun launchMirrorActivity() {
+        val intent = Intent(this, MirrorActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        runCatching { startActivity(intent) }
+            .onFailure { Log.w(TAG, "Failed to launch MirrorActivity: ${it.message}") }
     }
 
     // --- helpers ----------------------------------------------------------

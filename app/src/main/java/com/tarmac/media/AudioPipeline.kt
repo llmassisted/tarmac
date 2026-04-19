@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaCodec
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.util.Log
 import java.nio.ByteBuffer
@@ -31,12 +32,14 @@ class AudioPipeline {
         private const val SAMPLE_RATE = 44_100
         private const val CHANNEL_COUNT = 2
         private const val DEQUEUE_TIMEOUT_US = 5_000L
+        private const val ALAC_MIME = "audio/alac"
     }
 
     private var codec: MediaCodec? = null
     private var track: AudioTrack? = null
     private val started = AtomicBoolean(false)
     @Volatile private var currentCt: Int = -1
+    @Volatile private var alacUnsupportedLogged = false
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -69,13 +72,25 @@ class AudioPipeline {
         codec = null
         currentCt = ct
         val mime = when (ct) {
-            1 -> "audio/alac"
+            1 -> ALAC_MIME
             2, 4 -> MediaFormat.MIMETYPE_AUDIO_AAC
             8 -> return  // PCM: no codec needed
             else -> {
                 Log.w(TAG, "Unknown compression type $ct — skipping codec setup")
                 return
             }
+        }
+        // Android has no guaranteed ALAC decoder; a lot of TV devices ship
+        // without one. Detect up-front so we don't crash MediaCodec with
+        // MediaCodec$CodecException on createDecoderByType.
+        if (mime == ALAC_MIME && !hasDecoderFor(ALAC_MIME)) {
+            if (!alacUnsupportedLogged) {
+                Log.w(TAG, "No ALAC decoder on this device; dropping ALAC frames. " +
+                        "macOS mirror audio uses AAC-ELD so this typically only " +
+                        "trips on iTunes/Music AirPlay.")
+                alacUnsupportedLogged = true
+            }
+            return
         }
         val format = MediaFormat.createAudioFormat(mime, SAMPLE_RATE, CHANNEL_COUNT).apply {
             if (mime == MediaFormat.MIMETYPE_AUDIO_AAC) {
@@ -94,6 +109,13 @@ class AudioPipeline {
             codec = c
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to configure audio codec for ct=$ct: ${t.message}")
+        }
+    }
+
+    private fun hasDecoderFor(mime: String): Boolean {
+        val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        return list.codecInfos.any { info ->
+            !info.isEncoder && info.supportedTypes.any { it.equals(mime, ignoreCase = true) }
         }
     }
 
