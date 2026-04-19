@@ -65,8 +65,10 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         }
 
         val deviceName = resolveDeviceName()
+        val hwAddr = deviceHwAddr()
         val port = AirPlayJni.startServer(
             deviceName,
+            hwAddr,
             BonjourAdvertiser.FEATURES_DEFAULT,
             currentPin.toInt(),
         )
@@ -87,7 +89,7 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         }
 
         bonjour = BonjourAdvertiser(this).also {
-            it.start(deviceName, deviceHwAddr(), advertisePort)
+            it.start(deviceName, hwAddr, advertisePort)
         }
 
         updateNotification(getString(R.string.service_running) + " — PIN $currentPin")

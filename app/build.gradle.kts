@@ -24,10 +24,10 @@ android {
                 cppFlags += "-std=c++17"
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
-                    // TODO(phase-2 follow-up): flip to ON once libplist is vendored.
-                    // OpenSSL is wired via the prefab AAR; libplist is the remaining
-                    // dep blocker for compiling native/libairplay/lib/.
-                    "-DTARMAC_LINK_LIBAIRPLAY=OFF"
+                    // libplist is now vendored under native/libplist and
+                    // OpenSSL ships via the prefab AAR, so the JNI lib links
+                    // UxPlay's RAOP/RTSP server by default.
+                    "-DTARMAC_LINK_LIBAIRPLAY=ON"
                 )
             }
         }

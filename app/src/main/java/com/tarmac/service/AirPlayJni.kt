@@ -44,7 +44,7 @@ object AirPlayJni {
     @Volatile var videoPipeline: VideoPipeline? = null
     @Volatile var audioPipeline: AudioPipeline? = null
 
-    external fun startServer(deviceName: String, features: Long, pin: Int): Int
+    external fun startServer(deviceName: String, hwAddr: ByteArray, features: Long, pin: Int): Int
     external fun stopServer()
     external fun nativeVersion(): String
 

@@ -28,6 +28,7 @@
 extern "C" {
 #include "raop.h"
 #include "stream.h"
+#include "dnssd.h"
 }
 #endif
 
@@ -47,6 +48,7 @@ jmethodID g_mid_on_session_state = nullptr;  // (I)V
 #ifdef HAVE_LIBAIRPLAY
 std::mutex g_raop_mutex;
 raop_t* g_raop = nullptr;
+dnssd_t* g_dnssd = nullptr;
 #endif
 
 JNIEnv* attach_env(bool* should_detach) {
@@ -148,10 +150,12 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
 extern "C" JNIEXPORT jint JNICALL
 Java_com_tarmac_service_AirPlayJni_startServer(
         JNIEnv* env, jobject thiz,
-        jstring deviceName, jlong features, jint pin) {
+        jstring deviceName, jbyteArray hwAddr, jlong features, jint pin) {
     const char* name = env->GetStringUTFChars(deviceName, nullptr);
-    LOGI("startServer(name=%s, features=0x%llx, pin=%d)",
-         name ? name : "(null)", (long long) features, pin);
+    jsize hwLen = env->GetArrayLength(hwAddr);
+    jbyte* hwBytes = env->GetByteArrayElements(hwAddr, nullptr);
+    LOGI("startServer(name=%s, hwLen=%d, features=0x%llx, pin=%d)",
+         name ? name : "(null)", (int) hwLen, (long long) features, pin);
 
     if (g_callback_obj) {
         env->DeleteGlobalRef(g_callback_obj);
@@ -163,6 +167,7 @@ Java_com_tarmac_service_AirPlayJni_startServer(
 #ifdef HAVE_LIBAIRPLAY
     std::lock_guard<std::mutex> lock(g_raop_mutex);
     if (g_raop) {
+        env->ReleaseByteArrayElements(hwAddr, hwBytes, JNI_ABORT);
         env->ReleaseStringUTFChars(deviceName, name);
         LOGW("startServer: already running");
         return 0;
@@ -179,19 +184,29 @@ Java_com_tarmac_service_AirPlayJni_startServer(
     g_raop = raop_init(&cbs);
     if (!g_raop) {
         LOGE("raop_init failed");
+        env->ReleaseByteArrayElements(hwAddr, hwBytes, JNI_ABORT);
         env->ReleaseStringUTFChars(deviceName, name);
         return -1;
     }
     raop_set_log_callback(g_raop, cb_log, nullptr);
     raop_set_log_level(g_raop, 3);
 
-    // mac_address comes from the Java side via a future setHwAddr() call;
-    // for now use a stable placeholder so raop_init2 has something to hash.
-    const char* mac = "02:00:00:00:00:00";
+    // libairplay's raop_init2 takes a colon-formatted MAC string; build it
+    // from the 6 hwAddr bytes the Java service handed us.
+    char mac[18] = {0};
+    if (hwLen == 6) {
+        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 (unsigned char) hwBytes[0], (unsigned char) hwBytes[1],
+                 (unsigned char) hwBytes[2], (unsigned char) hwBytes[3],
+                 (unsigned char) hwBytes[4], (unsigned char) hwBytes[5]);
+    } else {
+        snprintf(mac, sizeof(mac), "02:00:00:00:00:00");
+    }
     if (raop_init2(g_raop, /*nohold*/1, mac, /*keyfile*/"")) {
         LOGE("raop_init2 failed");
         raop_destroy(g_raop);
         g_raop = nullptr;
+        env->ReleaseByteArrayElements(hwAddr, hwBytes, JNI_ABORT);
         env->ReleaseStringUTFChars(deviceName, name);
         return -2;
     }
@@ -201,14 +216,36 @@ Java_com_tarmac_service_AirPlayJni_startServer(
     raop_set_plist(g_raop, "refreshRate", 60);
     raop_set_plist(g_raop, "maxFPS", 60);
 
+    // raop_handlers.h does `assert(raop->dnssd)` inside the /info handler, so
+    // we have to hand raop a dnssd_t even though the real Bonjour record is
+    // advertised on the Java side via NsdManager. The stub dnssd_stub.c
+    // builds the TXT bytes raop will return inside plist replies.
+    const int name_len = name ? (int) strlen(name) : 0;
+    int dnssd_err = 0;
+    g_dnssd = dnssd_init(name ? name : "Tarmac", name_len,
+                         (hwLen == 6) ? (const char*) hwBytes : "\x02\x00\x00\x00\x00\x00",
+                         6, &dnssd_err, /*pin_pw*/ pin > 0 ? 1 : 0);
+    if (!g_dnssd) {
+        LOGE("dnssd_init failed (err=%d)", dnssd_err);
+        raop_destroy(g_raop);
+        g_raop = nullptr;
+        env->ReleaseByteArrayElements(hwAddr, hwBytes, JNI_ABORT);
+        env->ReleaseStringUTFChars(deviceName, name);
+        return -3;
+    }
+    raop_set_dnssd(g_raop, g_dnssd);
+
     unsigned short port = 0;
     raop_start_httpd(g_raop, &port);
     raop_set_port(g_raop, port);
     LOGI("raop server listening on port %u", (unsigned) port);
 
+    env->ReleaseByteArrayElements(hwAddr, hwBytes, JNI_ABORT);
     env->ReleaseStringUTFChars(deviceName, name);
     return (jint) port;
 #else
+    (void) hwBytes;
+    env->ReleaseByteArrayElements(hwAddr, hwBytes, JNI_ABORT);
     env->ReleaseStringUTFChars(deviceName, name);
     LOGW("startServer: libairplay not linked (TARMAC_LINK_LIBAIRPLAY=OFF). "
          "Returning stub success.");
@@ -226,6 +263,10 @@ Java_com_tarmac_service_AirPlayJni_stopServer(JNIEnv* env, jobject /*thiz*/) {
             raop_stop_httpd(g_raop);
             raop_destroy(g_raop);
             g_raop = nullptr;
+        }
+        if (g_dnssd) {
+            dnssd_destroy(g_dnssd);
+            g_dnssd = nullptr;
         }
     }
 #endif
