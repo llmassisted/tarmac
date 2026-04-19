@@ -56,8 +56,9 @@ object AirPlayJni {
      * is only valid for the duration of this call — copy out before returning
      * if you queue it.
      */
+    // Instance (not @JvmStatic) — the JNI bridge holds a global ref to the
+    // singleton instance and calls these via GetMethodID + CallVoidMethod.
     @Suppress("unused")
-    @JvmStatic
     fun onVideoData(direct: ByteBuffer, length: Int, isH265: Boolean, ntpTimeLocal: Long) {
         videoPipeline?.submit(direct, length, isH265, ntpTimeLocal)
     }
@@ -67,20 +68,17 @@ object AirPlayJni {
      * `audio_decode_struct.ct` — 1=ALAC, 2=AAC-LC, 4=AAC-ELD, 8=PCM.
      */
     @Suppress("unused")
-    @JvmStatic
     fun onAudioData(direct: ByteBuffer, length: Int, compressionType: Int, ntpTimeLocal: Long) {
         audioPipeline?.submit(direct, length, compressionType, ntpTimeLocal)
     }
 
     @Suppress("unused")
-    @JvmStatic
     fun onPinDisplay(pin: String) {
         Log.i(TAG, "onPinDisplay($pin)")
         listenerRef.get()?.onPinDisplay(pin)
     }
 
     @Suppress("unused")
-    @JvmStatic
     fun onSessionState(state: Int) {
         val s = if (state == 1) SessionState.ACTIVE else SessionState.IDLE
         Log.i(TAG, "onSessionState($s)")
