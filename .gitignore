@@ -11,6 +11,7 @@ captures/
 build/
 out/
 gradle-app.setting
+.kotlin/
 !gradle-wrapper.jar
 !gradle-wrapper.properties
 

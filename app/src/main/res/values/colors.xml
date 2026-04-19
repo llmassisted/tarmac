@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="tarmac_asphalt">@android:color/black</color>
+    <color name="tarmac_stripe">#FFE9B949</color>
+</resources>

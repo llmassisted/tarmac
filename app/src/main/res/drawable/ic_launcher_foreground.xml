@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="@color/tarmac_stripe"
+        android:pathData="M30,48 h48 v12 h-48 z" />
+    <path
+        android:fillColor="@color/tarmac_stripe"
+        android:pathData="M36,36 h6 v6 h-6 z M52,36 h6 v6 h-6 z M68,36 h6 v6 h-6 z" />
+    <path
+        android:fillColor="@color/tarmac_stripe"
+        android:pathData="M36,66 h6 v6 h-6 z M52,66 h6 v6 h-6 z M68,66 h6 v6 h-6 z" />
+</vector>
