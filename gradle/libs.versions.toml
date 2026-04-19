@@ -9,7 +9,7 @@ tvMaterial = "1.0.0"
 lifecycle = "2.8.6"
 coroutines = "1.9.0"
 media3 = "1.4.1"
-opensslPrefab = "1.1.1q-beta-1"
+opensslPrefab = "3.0.15"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -21,7 +21,12 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
 media3-exoplayer-hls = { group = "androidx.media3", name = "media3-exoplayer-hls", version.ref = "media3" }
 media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }
-ndk-openssl = { group = "com.android.ndk.thirdparty", name = "openssl", version.ref = "opensslPrefab" }
+# Google's com.android.ndk.thirdparty:openssl publishes only up to
+# 1.1.1q-beta-1 (EOL Sept 2023). io.github.ronickg:openssl is a community
+# mirror that follows ndkports layout exactly and publishes OpenSSL 3.x
+# (currently 3.0.15). Same prefab module names (crypto / ssl) so CMake's
+# `find_package(openssl REQUIRED CONFIG)` stays unchanged.
+ndk-openssl = { group = "io.github.ronickg", name = "openssl", version.ref = "opensslPrefab" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

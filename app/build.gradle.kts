@@ -83,7 +83,10 @@ dependencies {
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.ui)
 
-    // Prefab AAR providing OpenSSL 1.1.1q for Android NDK (libcrypto + libssl).
-    // Consumed via CMake `find_package(openssl REQUIRED CONFIG)`.
+    // Prefab AAR providing OpenSSL 3.x (libcrypto + libssl) for the Android
+    // NDK. Consumed via CMake `find_package(openssl REQUIRED CONFIG)` — see
+    // app/src/main/cpp/CMakeLists.txt. See gradle/libs.versions.toml for why
+    // this uses the community io.github.ronickg coordinates instead of
+    // com.android.ndk.thirdparty (which has no 3.x release).
     implementation(libs.ndk.openssl)
 }

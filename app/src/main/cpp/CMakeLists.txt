@@ -23,7 +23,13 @@ add_library(tarmac-native SHARED
     android_audio_renderer.cpp
 )
 
-# OpenSSL prefab — always wired so crypto is ready as soon as libairplay is on.
+# OpenSSL 3.x prefab (io.github.ronickg:openssl, ndkports layout). The CMake
+# package name (`openssl`) and module names (`crypto`, `ssl`) match Google's
+# AAR, so the link commands stay unchanged if/when we switch back.
+#
+# OPENSSL_API_COMPAT=0x10101000L keeps UxPlay's crypto.c / srp.c seeing
+# 1.1.1-era typedefs (EVP_* and SHA/MD5 helpers are still available in the
+# default OpenSSL 3 provider, so runtime is unaffected).
 find_package(openssl REQUIRED CONFIG)
 target_link_libraries(tarmac-native openssl::crypto openssl::ssl)
 target_compile_definitions(tarmac-native PRIVATE OPENSSL_API_COMPAT=0x10101000L)
