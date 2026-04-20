@@ -1,3 +1,5 @@
-// Phase-2 target: decode AAC-ELD / ALAC frames from UxPlay's RAOP session and
-// push PCM to a Java AudioPipeline backed by AudioTrack (low-latency mode).
-// Empty in Phase 1 so the shared lib links.
+// Phase 2: audio decoding lives on the Java side (com.tarmac.media.AudioPipeline,
+// MediaCodec → AudioTrack). The native bridge in jni_bridge.cpp forwards the
+// raw frames via a direct ByteBuffer + compression-type tag; this file is
+// intentionally empty (kept for future native-side work like ALAC fallback or
+// AudioStream low-latency callbacks).

@@ -22,9 +22,20 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
-                arguments += listOf("-DANDROID_STL=c++_shared")
+                arguments += listOf(
+                    "-DANDROID_STL=c++_shared",
+                    // libplist is now vendored under native/libplist and
+                    // OpenSSL ships via the prefab AAR, so the JNI lib links
+                    // UxPlay's RAOP/RTSP server by default.
+                    "-DTARMAC_LINK_LIBAIRPLAY=ON"
+                )
             }
         }
+    }
+
+    buildFeatures {
+        viewBinding = true
+        prefab = true
     }
 
     buildTypes {
@@ -53,10 +64,6 @@ android {
         }
     }
 
-    buildFeatures {
-        viewBinding = true
-    }
-
     packaging {
         resources.excludes += listOf(
             "META-INF/LICENSE*",
@@ -75,4 +82,11 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.ui)
+
+    // Prefab AAR providing OpenSSL 3.x (libcrypto + libssl) for the Android
+    // NDK. Consumed via CMake `find_package(openssl REQUIRED CONFIG)` — see
+    // app/src/main/cpp/CMakeLists.txt. See gradle/libs.versions.toml for why
+    // this uses the community io.github.ronickg coordinates instead of
+    // com.android.ndk.thirdparty (which has no 3.x release).
+    implementation(libs.ndk.openssl)
 }

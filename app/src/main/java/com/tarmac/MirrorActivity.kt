@@ -5,10 +5,13 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
 import androidx.fragment.app.FragmentActivity
+import com.tarmac.media.VideoPipeline
+import com.tarmac.service.AirPlayJni
 
 class MirrorActivity : FragmentActivity(), SurfaceHolder.Callback {
 
     private lateinit var surfaceView: SurfaceView
+    private var pipeline: VideoPipeline? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -19,12 +22,17 @@ class MirrorActivity : FragmentActivity(), SurfaceHolder.Callback {
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        // Wired to VideoPipeline in Phase 2.
+        val p = VideoPipeline(holder.surface).also { it.start() }
+        pipeline = p
+        AirPlayJni.videoPipeline = p
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        AirPlayJni.videoPipeline = null
+        pipeline?.stop()
+        pipeline = null
     }
 }

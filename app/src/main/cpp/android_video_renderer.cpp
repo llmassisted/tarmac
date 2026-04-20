@@ -1,3 +1,5 @@
-// Phase-2 target: consume H.264/H.265 NALUs from the UxPlay mirror session
-// and forward them to a Java VideoPipeline (MediaCodec + SurfaceView, tunneled
-// mode for HDR10 passthrough). Empty in Phase 1 so the shared lib links.
+// Phase 2: video decoding lives on the Java side (com.tarmac.media.VideoPipeline,
+// MediaCodec → SurfaceView). The native bridge in jni_bridge.cpp forwards the
+// raw NALU bytes via a direct ByteBuffer; this file is intentionally empty
+// (kept as a translation unit so the CMake target list stays stable for
+// future native-side work like SEI/HDR-metadata parsing).
