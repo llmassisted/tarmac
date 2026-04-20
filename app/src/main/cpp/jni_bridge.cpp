@@ -44,6 +44,10 @@ jmethodID g_mid_on_video_data = nullptr;     // (Ljava/nio/ByteBuffer;IZJ)V
 jmethodID g_mid_on_audio_data = nullptr;     // (Ljava/nio/ByteBuffer;IIJ)V
 jmethodID g_mid_on_pin_display = nullptr;    // (Ljava/lang/String;)V
 jmethodID g_mid_on_session_state = nullptr;  // (I)V
+jmethodID g_mid_on_video_play = nullptr;     // (Ljava/lang/String;F)V
+jmethodID g_mid_on_video_stop = nullptr;     // ()V
+jmethodID g_mid_on_video_rate = nullptr;     // (F)V
+jmethodID g_mid_on_video_scrub = nullptr;    // (F)V
 
 #ifdef HAVE_LIBAIRPLAY
 std::mutex g_raop_mutex;
@@ -120,6 +124,41 @@ void cb_conn_init(void* /*cls*/)    { notify_session_state(1); }
 void cb_conn_destroy(void* /*cls*/) { notify_session_state(0); }
 void cb_conn_reset(void* /*cls*/, int /*reason*/) { notify_session_state(0); }
 
+void cb_video_play(void* /*cls*/, const char* location, const float start_position) {
+    if (!location) return;
+    bool detach = false;
+    JNIEnv* env = attach_env(&detach);
+    if (!env || !g_callback_obj || !g_mid_on_video_play) return;
+    jstring s = env->NewStringUTF(location);
+    env->CallVoidMethod(g_callback_obj, g_mid_on_video_play, s, (jfloat) start_position);
+    env->DeleteLocalRef(s);
+    if (detach) g_vm->DetachCurrentThread();
+}
+
+void cb_video_stop(void* /*cls*/) {
+    bool detach = false;
+    JNIEnv* env = attach_env(&detach);
+    if (!env || !g_callback_obj || !g_mid_on_video_stop) return;
+    env->CallVoidMethod(g_callback_obj, g_mid_on_video_stop);
+    if (detach) g_vm->DetachCurrentThread();
+}
+
+void cb_video_rate(void* /*cls*/, const float rate) {
+    bool detach = false;
+    JNIEnv* env = attach_env(&detach);
+    if (!env || !g_callback_obj || !g_mid_on_video_rate) return;
+    env->CallVoidMethod(g_callback_obj, g_mid_on_video_rate, (jfloat) rate);
+    if (detach) g_vm->DetachCurrentThread();
+}
+
+void cb_video_scrub(void* /*cls*/, const float position) {
+    bool detach = false;
+    JNIEnv* env = attach_env(&detach);
+    if (!env || !g_callback_obj || !g_mid_on_video_scrub) return;
+    env->CallVoidMethod(g_callback_obj, g_mid_on_video_scrub, (jfloat) position);
+    if (detach) g_vm->DetachCurrentThread();
+}
+
 void cb_log(void* /*cls*/, int level, const char* msg) {
     if (!msg) return;
     int prio = ANDROID_LOG_INFO;
@@ -137,6 +176,10 @@ void resolve_callback_methods(JNIEnv* env, jobject obj) {
     g_mid_on_audio_data    = env->GetMethodID(cls, "onAudioData",    "(Ljava/nio/ByteBuffer;IIJ)V");
     g_mid_on_pin_display   = env->GetMethodID(cls, "onPinDisplay",   "(Ljava/lang/String;)V");
     g_mid_on_session_state = env->GetMethodID(cls, "onSessionState", "(I)V");
+    g_mid_on_video_play    = env->GetMethodID(cls, "onVideoPlay",    "(Ljava/lang/String;F)V");
+    g_mid_on_video_stop    = env->GetMethodID(cls, "onVideoStop",    "()V");
+    g_mid_on_video_rate    = env->GetMethodID(cls, "onVideoRate",    "(F)V");
+    g_mid_on_video_scrub   = env->GetMethodID(cls, "onVideoScrub",   "(F)V");
     env->DeleteLocalRef(cls);
 }
 
@@ -174,12 +217,16 @@ Java_com_tarmac_service_AirPlayJni_startServer(
     }
     raop_callbacks_t cbs;
     memset(&cbs, 0, sizeof(cbs));
-    cbs.audio_process = cb_audio_process;
-    cbs.video_process = cb_video_process;
-    cbs.conn_init     = cb_conn_init;
-    cbs.conn_destroy  = cb_conn_destroy;
-    cbs.conn_reset    = cb_conn_reset;
-    cbs.display_pin   = cb_display_pin;
+    cbs.audio_process  = cb_audio_process;
+    cbs.video_process  = cb_video_process;
+    cbs.conn_init      = cb_conn_init;
+    cbs.conn_destroy   = cb_conn_destroy;
+    cbs.conn_reset     = cb_conn_reset;
+    cbs.display_pin    = cb_display_pin;
+    cbs.on_video_play  = cb_video_play;
+    cbs.on_video_stop  = cb_video_stop;
+    cbs.on_video_rate  = cb_video_rate;
+    cbs.on_video_scrub = cb_video_scrub;
 
     g_raop = raop_init(&cbs);
     if (!g_raop) {
@@ -278,6 +325,10 @@ Java_com_tarmac_service_AirPlayJni_stopServer(JNIEnv* env, jobject /*thiz*/) {
     g_mid_on_audio_data    = nullptr;
     g_mid_on_pin_display   = nullptr;
     g_mid_on_session_state = nullptr;
+    g_mid_on_video_play    = nullptr;
+    g_mid_on_video_stop    = nullptr;
+    g_mid_on_video_rate    = nullptr;
+    g_mid_on_video_scrub   = nullptr;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
