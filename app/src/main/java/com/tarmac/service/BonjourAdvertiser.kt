@@ -28,8 +28,9 @@ class BonjourAdvertiser(private val context: Context) {
     companion object {
         private const val TAG = "BonjourAdvertiser"
 
-        // From native/libairplay/lib/dnssdint.h.
-        // Bit 27 (legacy pairing) ON; baseline plus ScreenSeparateDisplay (bit 7).
+        // Matches FEATURES_1 in native/libairplay/lib/dnssdint.h (raw hex, no symbolic names).
+        // Per Apple's AirPlay spec: bit 7 = AirPlayScreen, bit 14 = ScreenSeparateDisplay,
+        // bit 27 = legacy pairing. All three bits are set in this mask.
         const val FEATURES_DEFAULT: Long = 0x5A7FFEE6L
 
         // Mirrors GLOBAL_MODEL / GLOBAL_VERSION / *_PI from libairplay headers.

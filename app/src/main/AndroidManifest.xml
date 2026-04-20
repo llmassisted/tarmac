@@ -52,6 +52,14 @@
             android:theme="@style/Theme.Tarmac.Fullscreen" />
 
         <activity
+            android:name=".VideoPlayerActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:resizeableActivity="false"
+            android:theme="@style/Theme.Tarmac.Fullscreen" />
+
+        <activity
             android:name=".ui.SettingsActivity"
             android:exported="false"
             android:label="@string/settings_title"

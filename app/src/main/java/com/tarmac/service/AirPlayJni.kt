@@ -33,6 +33,10 @@ object AirPlayJni {
     interface Listener {
         fun onPinDisplay(pin: String)
         fun onSessionState(state: SessionState)
+        fun onVideoPlay(url: String, startSec: Float)
+        fun onVideoStop()
+        fun onVideoRate(rate: Float)
+        fun onVideoScrub(positionSec: Float)
     }
 
     /** Java-side delegates. Set before calling [startServer]. */
@@ -83,5 +87,29 @@ object AirPlayJni {
         val s = if (state == 1) SessionState.ACTIVE else SessionState.IDLE
         Log.i(TAG, "onSessionState($s)")
         listenerRef.get()?.onSessionState(s)
+    }
+
+    @Suppress("unused")
+    fun onVideoPlay(url: String, startSec: Float) {
+        Log.i(TAG, "onVideoPlay(url=$url, start=$startSec)")
+        listenerRef.get()?.onVideoPlay(url, startSec)
+    }
+
+    @Suppress("unused")
+    fun onVideoStop() {
+        Log.i(TAG, "onVideoStop()")
+        listenerRef.get()?.onVideoStop()
+    }
+
+    @Suppress("unused")
+    fun onVideoRate(rate: Float) {
+        Log.i(TAG, "onVideoRate($rate)")
+        listenerRef.get()?.onVideoRate(rate)
+    }
+
+    @Suppress("unused")
+    fun onVideoScrub(positionSec: Float) {
+        Log.i(TAG, "onVideoScrub($positionSec)")
+        listenerRef.get()?.onVideoScrub(positionSec)
     }
 }

@@ -1,7 +1,10 @@
 package com.tarmac.service
 
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
@@ -63,4 +66,18 @@ object SessionStateBus {
             audioCodec = null,
         )
     }
+
+    // --- AirPlay Video (HLS) playback control events ---
+
+    sealed class VideoEvent {
+        data class Play(val url: String, val startSec: Float) : VideoEvent()
+        data class Rate(val rate: Float) : VideoEvent()
+        data class Scrub(val positionSec: Float) : VideoEvent()
+        object Stop : VideoEvent()
+    }
+
+    private val _videoEvents = MutableSharedFlow<VideoEvent>(extraBufferCapacity = 4)
+    val videoEvents: SharedFlow<VideoEvent> = _videoEvents.asSharedFlow()
+
+    fun emitVideoEvent(event: VideoEvent) { _videoEvents.tryEmit(event) }
 }

@@ -16,6 +16,7 @@ import androidx.lifecycle.LifecycleService
 import androidx.preference.PreferenceManager
 import com.tarmac.MirrorActivity
 import com.tarmac.R
+import com.tarmac.VideoPlayerActivity
 import com.tarmac.media.AudioPipeline
 import kotlin.random.Random
 
@@ -173,6 +174,29 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         }
         runCatching { startActivity(intent) }
             .onFailure { Log.w(TAG, "Failed to launch MirrorActivity: ${it.message}") }
+    }
+
+    override fun onVideoPlay(url: String, startSec: Float) {
+        SessionStateBus.emitVideoEvent(SessionStateBus.VideoEvent.Play(url, startSec))
+        val intent = Intent(this, VideoPlayerActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra(VideoPlayerActivity.EXTRA_URL, url)
+            putExtra(VideoPlayerActivity.EXTRA_START_SEC, startSec)
+        }
+        runCatching { startActivity(intent) }
+            .onFailure { Log.w(TAG, "Failed to launch VideoPlayerActivity: ${it.message}") }
+    }
+
+    override fun onVideoStop() {
+        SessionStateBus.emitVideoEvent(SessionStateBus.VideoEvent.Stop)
+    }
+
+    override fun onVideoRate(rate: Float) {
+        SessionStateBus.emitVideoEvent(SessionStateBus.VideoEvent.Rate(rate))
+    }
+
+    override fun onVideoScrub(positionSec: Float) {
+        SessionStateBus.emitVideoEvent(SessionStateBus.VideoEvent.Scrub(positionSec))
     }
 
     // --- helpers ----------------------------------------------------------
