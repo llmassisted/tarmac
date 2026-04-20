@@ -177,6 +177,7 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
     }
 
     override fun onVideoPlay(url: String, startSec: Float) {
+        SessionStateBus.emitVideoEvent(SessionStateBus.VideoEvent.Play(url, startSec))
         val intent = Intent(this, VideoPlayerActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             putExtra(VideoPlayerActivity.EXTRA_URL, url)
