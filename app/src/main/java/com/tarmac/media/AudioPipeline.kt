@@ -1,5 +1,6 @@
 package com.tarmac.media
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -8,6 +9,8 @@ import android.media.MediaCodec
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.util.Log
+import com.tarmac.service.Prefs
+import com.tarmac.service.SessionStateBus
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -25,7 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * ALAC is handled by switching the MediaCodec MIME type. PCM bypasses the
  * codec entirely.
  */
-class AudioPipeline {
+class AudioPipeline(private val appContext: Context? = null) {
 
     companion object {
         private const val TAG = "AudioPipeline"
@@ -33,6 +36,7 @@ class AudioPipeline {
         private const val CHANNEL_COUNT = 2
         private const val DEQUEUE_TIMEOUT_US = 5_000L
         private const val ALAC_MIME = "audio/alac"
+        private const val DEFAULT_BUFFER_KB = 16
     }
 
     private var codec: MediaCodec? = null
@@ -74,12 +78,16 @@ class AudioPipeline {
         val mime = when (ct) {
             1 -> ALAC_MIME
             2, 4 -> MediaFormat.MIMETYPE_AUDIO_AAC
-            8 -> return  // PCM: no codec needed
+            8 -> {
+                SessionStateBus.setAudioCodec("PCM")
+                return  // PCM: no codec needed
+            }
             else -> {
                 Log.w(TAG, "Unknown compression type $ct — skipping codec setup")
                 return
             }
         }
+        SessionStateBus.setAudioCodec(audioCodecLabel(ct))
         // Android has no guaranteed ALAC decoder; a lot of TV devices ship
         // without one. Detect up-front so we don't crash MediaCodec with
         // MediaCodec$CodecException on createDecoderByType.
@@ -157,12 +165,24 @@ class AudioPipeline {
         track?.write(pcm, 0, length, AudioTrack.WRITE_NON_BLOCKING)
     }
 
+    private fun audioCodecLabel(ct: Int): String = when (ct) {
+        1 -> "ALAC"
+        2 -> "AAC-LC"
+        4 -> "AAC-ELD"
+        8 -> "PCM"
+        else -> "ct=$ct"
+    }
+
     private fun buildAudioTrack(): AudioTrack {
         val channelMask =
             if (CHANNEL_COUNT == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
         val minBuf = AudioTrack.getMinBufferSize(
             SAMPLE_RATE, channelMask, AudioFormat.ENCODING_PCM_16BIT,
         ).coerceAtLeast(8192)
+        // User-tunable buffer (KB → bytes), floored at MediaCodec's minimum so
+        // we don't hand AudioTrack a buffer it'll reject.
+        val requestedBytes = (appContext?.let { Prefs.audioBufferKb(it) } ?: DEFAULT_BUFFER_KB) * 1024
+        val bufBytes = maxOf(requestedBytes, minBuf)
         return AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -178,7 +198,7 @@ class AudioPipeline {
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .build()
             )
-            .setBufferSizeInBytes(minBuf * 2)
+            .setBufferSizeInBytes(bufBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()

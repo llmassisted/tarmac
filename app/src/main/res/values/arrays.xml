@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="audio_buffer_entries">
+        <item>@string/prefs_audio_buffer_8</item>
+        <item>@string/prefs_audio_buffer_16</item>
+        <item>@string/prefs_audio_buffer_32</item>
+        <item>@string/prefs_audio_buffer_64</item>
+    </string-array>
+    <string-array name="audio_buffer_values" translatable="false">
+        <item>8</item>
+        <item>16</item>
+        <item>32</item>
+        <item>64</item>
+    </string-array>
+</resources>

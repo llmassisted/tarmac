@@ -6,6 +6,13 @@
         <item name="android:windowBackground">@android:color/black</item>
     </style>
 
+    <!-- Leanback's settings fragments expect Theme.Leanback (the plain
+         variant), NOT Theme.Leanback.Browse — the Browse theme adds a
+         header bar that overlaps the preference list. -->
+    <style name="Theme.Tarmac.Settings" parent="Theme.Leanback">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+
     <style name="Theme.Tarmac.Fullscreen" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowContentOverlay">@null</item>

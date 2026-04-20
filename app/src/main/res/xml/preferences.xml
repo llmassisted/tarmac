@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <PreferenceCategory android:title="@string/prefs_category_identity">
+        <EditTextPreference
+            android:key="pref_device_name"
+            android:title="@string/prefs_device_name_title"
+            android:summary="@string/prefs_device_name_summary"
+            android:dialogTitle="@string/prefs_device_name_title" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="@string/prefs_category_video">
+        <SwitchPreference
+            android:key="pref_force_h265"
+            android:title="@string/prefs_force_h265_title"
+            android:summary="@string/prefs_force_h265_summary"
+            android:defaultValue="false" />
+        <!-- pref_force_1080p will return in Phase 5 when 4K negotiation lands;
+             today the pipeline is always 1080p so the toggle would be a no-op. -->
+        <SwitchPreference
+            android:key="pref_hdr_enabled"
+            android:title="@string/prefs_hdr_title"
+            android:summary="@string/prefs_hdr_summary"
+            android:defaultValue="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory android:title="@string/prefs_category_audio">
+        <ListPreference
+            android:key="pref_audio_buffer_kb"
+            android:title="@string/prefs_audio_buffer_title"
+            android:summary="@string/prefs_audio_buffer_summary"
+            android:entries="@array/audio_buffer_entries"
+            android:entryValues="@array/audio_buffer_values"
+            android:defaultValue="16" />
+    </PreferenceCategory>
+
+</PreferenceScreen>
