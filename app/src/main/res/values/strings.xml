@@ -4,4 +4,41 @@
     <string name="status_header">AirPlay</string>
     <string name="service_channel_name">Tarmac AirPlay service</string>
     <string name="service_running">Ready for AirPlay</string>
+
+    <!-- MainFragment rows -->
+    <string name="row_receiver">Receiver</string>
+    <string name="row_connection">Connection</string>
+    <string name="row_stream">Stream</string>
+    <string name="row_settings">Settings</string>
+
+    <string name="status_device_name">Name: %1$s</string>
+    <string name="status_pin_waiting">Waiting for client — PIN %1$s</string>
+    <string name="status_pin_idle">Idle — PIN %1$s</string>
+    <string name="status_active">Streaming from client</string>
+    <string name="status_video_pending">Video: waiting for first frame</string>
+    <string name="status_video">Video: %1$s %2$s · %3$s · %4$s</string>
+    <string name="status_audio">Audio: %1$s</string>
+    <string name="status_audio_pending">Audio: waiting for first frame</string>
+    <string name="status_open_settings">Open settings</string>
+    <string name="status_unknown">—</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Tarmac settings</string>
+    <string name="prefs_category_identity">Identity</string>
+    <string name="prefs_category_video">Video</string>
+    <string name="prefs_category_audio">Audio</string>
+    <string name="prefs_device_name_title">Device name</string>
+    <string name="prefs_device_name_summary">Shown in macOS Screen Mirroring. Leave blank to use the system device name.</string>
+    <string name="prefs_force_h265_title">Force H.265 decode</string>
+    <string name="prefs_force_h265_summary">Configure MediaCodec for HEVC even on first H.264 frame. Use only if your TV decodes HEVC.</string>
+    <string name="prefs_force_1080p_title">Cap at 1080p</string>
+    <string name="prefs_force_1080p_summary">Advertise 1920×1080 even on 4K TVs. Useful for slow networks.</string>
+    <string name="prefs_hdr_title">HDR passthrough</string>
+    <string name="prefs_hdr_summary">Configure decoder for HDR10 (BT.2020 / ST 2084). Phase 5 — enables hardware-tunneled output.</string>
+    <string name="prefs_audio_buffer_title">Audio buffer size</string>
+    <string name="prefs_audio_buffer_summary">Larger buffers reduce dropouts; smaller buffers reduce A/V offset.</string>
+    <string name="prefs_audio_buffer_8">8 kB (lowest latency)</string>
+    <string name="prefs_audio_buffer_16">16 kB (default)</string>
+    <string name="prefs_audio_buffer_32">32 kB</string>
+    <string name="prefs_audio_buffer_64">64 kB (most stable)</string>
 </resources>

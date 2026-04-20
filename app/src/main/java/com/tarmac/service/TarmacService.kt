@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.PowerManager
@@ -12,6 +13,7 @@ import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
+import androidx.preference.PreferenceManager
 import com.tarmac.MirrorActivity
 import com.tarmac.R
 import com.tarmac.media.AudioPipeline
@@ -32,14 +34,24 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
     @Volatile private var currentPin: String = ""
     @Volatile private var sessionState: AirPlayJni.SessionState = AirPlayJni.SessionState.IDLE
 
+    /**
+     * When the user changes device name from Settings while the service is
+     * running, restart the AirPlay server so the new name is reflected in the
+     * mDNS advertisement. Other prefs (codec/HDR/buffer) take effect on next
+     * stream and don't require a restart.
+     */
+    private val prefListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == Prefs.KEY_DEVICE_NAME) {
+                Log.i(TAG, "device name changed — restarting AirPlay server")
+                restartAirPlay()
+            }
+        }
+
     override fun onCreate() {
         super.onCreate()
         val notification = buildNotification(getString(R.string.service_running))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Android 10+ supports typed startForeground; Android 14 (API 34)
-            // *requires* it and throws MissingForegroundServiceTypeException
-            // otherwise. `mediaPlayback` also has to be declared in the
-            // manifest <service> entry and backed by the matching permission.
             startForeground(
                 NOTIFICATION_ID,
                 notification,
@@ -48,23 +60,29 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        PreferenceManager.getDefaultSharedPreferences(this)
+            .registerOnSharedPreferenceChangeListener(prefListener)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        if (bonjour != null) return START_STICKY  // already running
+        if (bonjour == null) startAirPlay()
+        return START_STICKY
+    }
 
+    private fun startAirPlay() {
         AirPlayJni.setListener(this)
         currentPin = "%04d".format(Random.nextInt(0, 10_000))
+        SessionStateBus.setPin(currentPin)
+        SessionStateBus.setConnection(SessionStateBus.Connection.IDLE)
 
-        // Audio pipeline starts immediately; video pipeline binds when
-        // MirrorActivity hands its Surface to AirPlayJni.
-        audioPipeline = AudioPipeline().also {
+        audioPipeline = AudioPipeline(applicationContext).also {
             it.start()
             AirPlayJni.audioPipeline = it
         }
 
         val deviceName = resolveDeviceName()
+        SessionStateBus.setDeviceName(deviceName)
         val hwAddr = deviceHwAddr()
         val port = AirPlayJni.startServer(
             deviceName,
@@ -75,17 +93,16 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         if (port < 0) {
             Log.e(TAG, "AirPlayJni.startServer returned $port — bailing")
             stopSelf()
-            return START_NOT_STICKY
+            return
         }
-        // When libairplay is stubbed the native side returns 0; advertise
-        // 7000 (the conventional AirPlay control port) so Bonjour wiring is
-        // still exercised end-to-end.
         val advertisePort = if (port > 0) port else 7000
 
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Tarmac:airplay").apply {
-            setReferenceCounted(false)
-            acquire(8 * 60 * 60 * 1000L)
+        if (wakeLock == null) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Tarmac:airplay").apply {
+                setReferenceCounted(false)
+                acquire(8 * 60 * 60 * 1000L)
+            }
         }
 
         bonjour = BonjourAdvertiser(this).also {
@@ -93,10 +110,9 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         }
 
         updateNotification(getString(R.string.service_running) + " — PIN $currentPin")
-        return START_STICKY
     }
 
-    override fun onDestroy() {
+    private fun stopAirPlay() {
         bonjour?.stop()
         bonjour = null
         AirPlayJni.audioPipeline = null
@@ -105,6 +121,19 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         AirPlayJni.setListener(null)
         audioPipeline?.stop()
         audioPipeline = null
+        SessionStateBus.setConnection(SessionStateBus.Connection.IDLE)
+        SessionStateBus.clearMediaStats()
+    }
+
+    private fun restartAirPlay() {
+        stopAirPlay()
+        startAirPlay()
+    }
+
+    override fun onDestroy() {
+        PreferenceManager.getDefaultSharedPreferences(this)
+            .unregisterOnSharedPreferenceChangeListener(prefListener)
+        stopAirPlay()
         wakeLock?.runCatching { if (isHeld) release() }
         wakeLock = null
         super.onDestroy()
@@ -114,11 +143,18 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
 
     override fun onPinDisplay(pin: String) {
         currentPin = pin
+        SessionStateBus.setPin(pin)
         updateNotification(getString(R.string.service_running) + " — PIN $pin")
     }
 
     override fun onSessionState(state: AirPlayJni.SessionState) {
         sessionState = state
+        val busState = when (state) {
+            AirPlayJni.SessionState.ACTIVE -> SessionStateBus.Connection.ACTIVE
+            AirPlayJni.SessionState.IDLE -> SessionStateBus.Connection.IDLE
+        }
+        SessionStateBus.setConnection(busState)
+        if (state == AirPlayJni.SessionState.IDLE) SessionStateBus.clearMediaStats()
         updateNotification(
             when (state) {
                 AirPlayJni.SessionState.ACTIVE -> "Streaming from client"
@@ -141,9 +177,15 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
 
     // --- helpers ----------------------------------------------------------
 
+    /**
+     * Settings → Identity → Device name wins; otherwise fall back to the
+     * system Settings.Global.DEVICE_NAME (e.g. "Living Room TV"); finally
+     * the static [DEFAULT_DEVICE_NAME].
+     */
     private fun resolveDeviceName(): String {
-        val n = Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
-        return if (n.isNullOrBlank()) DEFAULT_DEVICE_NAME else n
+        Prefs.deviceName(this).takeIf { it.isNotBlank() }?.let { return it }
+        val sys = Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
+        return if (sys.isNullOrBlank()) DEFAULT_DEVICE_NAME else sys
     }
 
     /**
@@ -156,7 +198,6 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         val md = java.security.MessageDigest.getInstance("SHA-1")
         val digest = md.digest(androidId.toByteArray())
         return digest.copyOfRange(0, 6).also {
-            // Set locally-administered + unicast bit pattern.
             it[0] = ((it[0].toInt() and 0xFE) or 0x02).toByte()
         }
     }

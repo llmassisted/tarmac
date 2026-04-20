@@ -51,6 +51,13 @@
             android:resizeableActivity="false"
             android:theme="@style/Theme.Tarmac.Fullscreen" />
 
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false"
+            android:label="@string/settings_title"
+            android:screenOrientation="landscape"
+            android:theme="@style/Theme.Tarmac.Leanback" />
+
         <service
             android:name=".service.TarmacService"
             android:exported="false"
