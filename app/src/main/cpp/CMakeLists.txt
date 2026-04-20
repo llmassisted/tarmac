@@ -59,9 +59,19 @@ if(TARMAC_LINK_LIBAIRPLAY)
         ${LIBAIRPLAY_DIR}/llhttp
         ${LIBAIRPLAY_DIR}/playfair
     )
+    # The vendored libplist (libimobiledevice/libplist @ dddb76d, ~2.6.x)
+    # ships both APIs UxPlay's lib/ guards on:
+    #   - PLIST_210: switches http_handlers.h to plist_get_data_ptr() instead
+    #     of the older plist_get_data_val() out-param signature.
+    #   - PLIST_230: skips lib/raop.c's local plist_mem_free shim because
+    #     2.3.0+ exports its own.
+    # Without PLIST_210 the build fails at http_handlers.h:631 with
+    # "assigning to 'char *' from incompatible type 'void'" — the legacy
+    # signature doesn't match the vendored header.
     target_compile_definitions(tarmac-native PRIVATE
         HAVE_LIBAIRPLAY=1
         NOHOLD=1
+        PLIST_210=1
         PLIST_230=1
     )
     target_link_libraries(tarmac-native plist)
