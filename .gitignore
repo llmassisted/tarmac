@@ -39,3 +39,8 @@ keystore.properties
 
 # Logs
 *.log
+
+# graphify regenerable artifacts (cache is rebuilt by `graphify update`;
+# graph.json / graph.html / GRAPH_REPORT.md / manifest.json / cost.json
+# stay tracked so the wiki and god-node hints are diffable in PRs).
+graphify-out/cache/

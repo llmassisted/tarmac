@@ -15,7 +15,6 @@ object Prefs {
 
     const val KEY_DEVICE_NAME    = "pref_device_name"
     const val KEY_FORCE_H265     = "pref_force_h265"
-    const val KEY_FORCE_1080P    = "pref_force_1080p"
     const val KEY_HDR_ENABLED    = "pref_hdr_enabled"
     const val KEY_AUDIO_BUFFER   = "pref_audio_buffer_kb"
 
@@ -25,7 +24,6 @@ object Prefs {
         sp(ctx).getString(KEY_DEVICE_NAME, "")?.takeIf { it.isNotBlank() } ?: ""
 
     fun forceH265(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_FORCE_H265, false)
-    fun force1080p(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_FORCE_1080P, false)
     fun hdrEnabled(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_HDR_ENABLED, false)
 
     /** Audio buffer in kilobytes; defaults to 16 kB which matches the Phase 2 baseline. */

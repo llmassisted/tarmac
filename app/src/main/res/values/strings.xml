@@ -31,8 +31,6 @@
     <string name="prefs_device_name_summary">Shown in macOS Screen Mirroring. Leave blank to use the system device name.</string>
     <string name="prefs_force_h265_title">Force H.265 decode</string>
     <string name="prefs_force_h265_summary">Configure MediaCodec for HEVC even on first H.264 frame. Use only if your TV decodes HEVC.</string>
-    <string name="prefs_force_1080p_title">Cap at 1080p</string>
-    <string name="prefs_force_1080p_summary">Advertise 1920×1080 even on 4K TVs. Useful for slow networks.</string>
     <string name="prefs_hdr_title">HDR passthrough</string>
     <string name="prefs_hdr_summary">Configure decoder for HDR10 (BT.2020 / ST 2084). Phase 5 — enables hardware-tunneled output.</string>
     <string name="prefs_audio_buffer_title">Audio buffer size</string>

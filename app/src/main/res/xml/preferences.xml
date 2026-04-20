@@ -15,11 +15,8 @@
             android:title="@string/prefs_force_h265_title"
             android:summary="@string/prefs_force_h265_summary"
             android:defaultValue="false" />
-        <SwitchPreference
-            android:key="pref_force_1080p"
-            android:title="@string/prefs_force_1080p_title"
-            android:summary="@string/prefs_force_1080p_summary"
-            android:defaultValue="false" />
+        <!-- pref_force_1080p will return in Phase 5 when 4K negotiation lands;
+             today the pipeline is always 1080p so the toggle would be a no-op. -->
         <SwitchPreference
             android:key="pref_hdr_enabled"
             android:title="@string/prefs_hdr_title"

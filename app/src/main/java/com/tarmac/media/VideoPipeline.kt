@@ -54,13 +54,14 @@ class VideoPipeline(
         if (!started.compareAndSet(false, true)) return
         val ctx = appContext
         val forceHevc = ctx?.let { Prefs.forceH265(it) } ?: false
-        val cap1080p = ctx?.let { Prefs.force1080p(it) } ?: false
         hdrEnabled = ctx?.let { Prefs.hdrEnabled(it) } ?: false
 
+        // Phase 3 baseline is fixed at 1080p; the force-1080p preference will
+        // become meaningful in Phase 5 when 4K negotiation lands.
         val effectiveHevc = useHevc || forceHevc
         currentMime = if (effectiveHevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
-        width = if (cap1080p) DEFAULT_WIDTH else DEFAULT_WIDTH
-        height = if (cap1080p) DEFAULT_HEIGHT else DEFAULT_HEIGHT
+        width = DEFAULT_WIDTH
+        height = DEFAULT_HEIGHT
 
         val format = MediaFormat.createVideoFormat(currentMime, width, height).apply {
             setInteger(MediaFormat.KEY_FRAME_RATE, 60)
