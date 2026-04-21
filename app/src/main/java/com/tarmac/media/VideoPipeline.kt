@@ -6,7 +6,6 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
-import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
 import android.view.Display
@@ -20,16 +19,22 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Decodes UxPlay's mirrored H.264 / H.265 NALU stream onto a [Surface] using
  * MediaCodec.
  *
- * Phase 5a:
- *  - Probes the active `Display` for 4K and HDR10 capability. When the TV can
- *    do 4K, configures adaptive playback (`KEY_MAX_WIDTH / HEIGHT = 3840 /
- *    2160`) so the codec can accept a 4K CSD without a reconfigure.
- *  - Parses each submitted HEVC NALU for picture size (SPS) and HDR10 static
- *    metadata (prefix SEI 137 + 144). First time the stream carries HDR10
- *    metadata we push it to MediaCodec via `setParameters(KEY_HDR_STATIC_INFO)`
- *    so the HDMI output signals the TV to enter HDR mode.
- *  - HDR is applied only when the user opted in AND the display reports HDR10
- *    support — otherwise the stream decodes in SDR without surprising the TV.
+ * Phase 5a uses a lazy-configure model for HEVC so HDR10 static metadata is
+ * passed to MediaCodec via `setByteBuffer(KEY_HDR_STATIC_INFO, ...)` at
+ * `configure()` time — the only API contract Android guarantees for this key.
+ *
+ *   1. `start()` captures intent (mime, display caps) but does not instantiate
+ *      the codec.
+ *   2. `submit()` buffers the first few NALU packets while scanning each for
+ *      the HEVC SPS (resolution) and prefix SEI 137/144 (mastering display +
+ *      content light level). For H.264 we configure on the first submit.
+ *   3. Once we have enough information — or we've hit [MAX_PRECONFIG_SUBMITS]
+ *      and stop waiting — we configure the codec with the correct picture
+ *      size, HDR color metadata, and (if seen) the HDR_STATIC_INFO blob, then
+ *      flush the buffered NALUs and enter steady-state pass-through.
+ *
+ * HDR is applied only when the user opted in AND the display reports HDR10
+ * support, so we don't send HDR metadata to a TV that can't render it.
  */
 class VideoPipeline(
     private val outputSurface: Surface,
@@ -44,7 +49,14 @@ class VideoPipeline(
         private const val UHD_H = 2160
         private const val DEQUEUE_TIMEOUT_US = 10_000L
         private const val STATS_INTERVAL_MS = 1_000L
+
+        // Enough to cover the initial IDR plus any delayed SEI. At 60fps this
+        // is ~260ms of startup buffering before we give up and configure in
+        // whatever state we have.
+        private const val MAX_PRECONFIG_SUBMITS = 16
     }
+
+    private data class Pending(val bytes: ByteArray, val ptsUs: Long)
 
     private var codec: MediaCodec? = null
     private val started = AtomicBoolean(false)
@@ -54,7 +66,12 @@ class VideoPipeline(
     @Volatile private var hdrEnabled: Boolean = false
     @Volatile private var displaySupportsHdr10: Boolean = false
     @Volatile private var displaySupports4k: Boolean = false
-    @Volatile private var hdrStaticInfoApplied: Boolean = false
+
+    // Pre-configure buffering state (RAOP callback thread only).
+    private val pending = ArrayDeque<Pending>()
+    private var pendingWidth: Int? = null
+    private var pendingHeight: Int? = null
+    private var pendingHdrBlob: ByteArray? = null
 
     // Stats — only mutated from the RAOP callback thread inside submit().
     private var statsWindowStartMs: Long = 0L
@@ -69,18 +86,88 @@ class VideoPipeline(
 
         probeDisplayCapabilities(ctx)
         hdrEnabled = hdrPrefOn && displaySupportsHdr10
-        hdrStaticInfoApplied = false
 
         val effectiveHevc = useHevc || forceHevc
         currentMime = if (effectiveHevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
         width = FHD_W
         height = FHD_H
 
-        // Configure the codec at 1080p but allow it to adapt up to 4K if the
-        // display can render it. This avoids a stop/start when the Mac sends
-        // a 4K CSD mid-session.
+        pending.clear()
+        pendingWidth = null
+        pendingHeight = null
+        pendingHdrBlob = null
+
+        Log.i(
+            TAG,
+            "VideoPipeline pending configure mime=$currentMime hdr=$hdrEnabled " +
+                "(prefOn=$hdrPrefOn displayHdr10=$displaySupportsHdr10 display4k=$displaySupports4k)",
+        )
+        publishStats(reset = true)
+    }
+
+    fun stop() {
+        if (!started.compareAndSet(true, false)) return
+        codec?.runCatching { stop(); release() }
+        codec = null
+        pending.clear()
+    }
+
+    fun submit(direct: ByteBuffer, length: Int, isH265: Boolean, ntpTimeLocal: Long) {
+        if (!started.get() || length <= 0) return
+        val expectedMime = if (isH265) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+        if (expectedMime != currentMime) {
+            stop()
+            start(useHevc = isH265)
+        }
+        val ptsUs = ntpTimeLocal / 1000L
+
+        if (codec == null) {
+            bufferForConfig(direct, length, ptsUs, isH265)
+            return
+        }
+        submitToCodec(direct, length, ptsUs)
+    }
+
+    /**
+     * Capture the NALU into the pre-config queue, update any side-data we can
+     * extract from it, and configure the codec once we have what we need (or
+     * we've waited long enough).
+     */
+    private fun bufferForConfig(direct: ByteBuffer, length: Int, ptsUs: Long, isH265: Boolean) {
+        val bytes = ByteArray(length)
+        val savedPos = direct.position()
+        direct.position(0)
+        direct.get(bytes, 0, length)
+        direct.position(savedPos)
+        pending.addLast(Pending(bytes, ptsUs))
+
+        if (isH265) {
+            val parsed = HevcBitstream.parse(ByteBuffer.wrap(bytes), length)
+            if (pendingWidth == null) {
+                parsed.widthPx?.let { w -> parsed.heightPx?.let { h -> pendingWidth = w; pendingHeight = h } }
+            }
+            if (pendingHdrBlob == null) parsed.hdrStaticInfo?.let { pendingHdrBlob = it }
+        }
+
+        // Ready when:
+        //  - H.264 (nothing to extract; configure with defaults and let the codec
+        //    adapt to real resolution from its own SPS parse).
+        //  - HEVC + SPS seen and either HDR not requested, or HDR blob also seen.
+        //  - We've waited long enough — configure in whatever state we're in so a
+        //    slow/absent SEI doesn't hang startup.
+        val ready = !isH265 ||
+            (pendingWidth != null && (!hdrEnabled || pendingHdrBlob != null)) ||
+            pending.size >= MAX_PRECONFIG_SUBMITS
+        if (ready) configureAndFlush()
+    }
+
+    private fun configureAndFlush() {
+        width = pendingWidth ?: FHD_W
+        height = pendingHeight ?: FHD_H
         val maxW = if (displaySupports4k) UHD_W else FHD_W
         val maxH = if (displaySupports4k) UHD_H else FHD_H
+        val hdrBlob = pendingHdrBlob
+
         val format = MediaFormat.createVideoFormat(currentMime, width, height).apply {
             setInteger(MediaFormat.KEY_FRAME_RATE, 60)
             setInteger(
@@ -93,6 +180,9 @@ class VideoPipeline(
                 setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
                 setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_ST2084)
                 setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+                if (hdrBlob != null) {
+                    setByteBuffer(MediaFormat.KEY_HDR_STATIC_INFO, ByteBuffer.wrap(hdrBlob))
+                }
             }
         }
         val c = MediaCodec.createDecoderByType(currentMime)
@@ -101,82 +191,40 @@ class VideoPipeline(
         codec = c
         Log.i(
             TAG,
-            "VideoPipeline started mime=$currentMime base=${width}x${height} " +
-                "max=${maxW}x${maxH} hdr=$hdrEnabled (prefOn=$hdrPrefOn displayHdr10=$displaySupportsHdr10)",
+            "VideoPipeline configured ${width}x${height} max=${maxW}x${maxH} " +
+                "hdr=$hdrEnabled hdrStaticInfo=${hdrBlob != null} queued=${pending.size}",
         )
         publishStats(reset = true)
-    }
 
-    fun stop() {
-        if (!started.compareAndSet(true, false)) return
-        codec?.runCatching { stop(); release() }
-        codec = null
-        hdrStaticInfoApplied = false
-    }
-
-    fun submit(direct: ByteBuffer, length: Int, isH265: Boolean, ntpTimeLocal: Long) {
-        val c = codec ?: return
-        val expectedMime = if (isH265) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
-        if (expectedMime != currentMime) {
-            stop()
-            start(useHevc = isH265)
+        while (pending.isNotEmpty()) {
+            val p = pending.removeFirst()
+            submitToCodec(ByteBuffer.wrap(p.bytes), p.bytes.size, p.ptsUs)
         }
-        val codecRef = codec ?: return
+    }
 
-        // Cheap pre-queue scan of the bitstream for resolution changes and
-        // HDR10 static metadata. Only HEVC carries what we're looking for.
-        if (isH265) maybeExtractHevcSideData(codecRef, direct, length)
-
+    private fun submitToCodec(src: ByteBuffer, length: Int, ptsUs: Long) {
+        val c = codec ?: return
         try {
-            val inIdx = codecRef.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
+            val inIdx = c.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
             if (inIdx < 0) return
-            val inBuf = codecRef.getInputBuffer(inIdx) ?: return
+            val inBuf = c.getInputBuffer(inIdx) ?: return
             inBuf.clear()
-            direct.position(0)
-            direct.limit(length)
-            inBuf.put(direct)
-            val ptsUs = ntpTimeLocal / 1000L
-            codecRef.queueInputBuffer(inIdx, 0, length, ptsUs, 0)
+            src.position(0)
+            src.limit(length)
+            inBuf.put(src)
+            c.queueInputBuffer(inIdx, 0, length, ptsUs, 0)
 
             val info = MediaCodec.BufferInfo()
-            var outIdx = codecRef.dequeueOutputBuffer(info, 0)
+            var outIdx = c.dequeueOutputBuffer(info, 0)
             while (outIdx >= 0) {
-                codecRef.releaseOutputBuffer(outIdx, /*render*/true)
-                outIdx = codecRef.dequeueOutputBuffer(info, 0)
+                c.releaseOutputBuffer(outIdx, /*render*/true)
+                outIdx = c.dequeueOutputBuffer(info, 0)
             }
             statsFrames += 1
             statsBytes += length
             maybePublishStats()
         } catch (t: Throwable) {
             Log.w(TAG, "submit failed: ${t.message}")
-        }
-    }
-
-    private fun maybeExtractHevcSideData(codecRef: MediaCodec, direct: ByteBuffer, length: Int) {
-        // Skip the scan once we've seen everything we need.
-        val needResolution = width == FHD_W && height == FHD_H
-        val needHdr = hdrEnabled && !hdrStaticInfoApplied
-        if (!needResolution && !needHdr) return
-
-        val parsed = HevcBitstream.parse(direct, length)
-        parsed.widthPx?.let { w ->
-            parsed.heightPx?.let { h ->
-                if (w != width || h != height) {
-                    width = w
-                    height = h
-                    Log.i(TAG, "HEVC SPS resolution detected ${w}x${h}")
-                    publishStats(reset = false)
-                }
-            }
-        }
-        if (needHdr) {
-            val blob = parsed.hdrStaticInfo ?: return
-            runCatching {
-                val params = Bundle().apply { putByteArray(MediaFormat.KEY_HDR_STATIC_INFO, blob) }
-                codecRef.setParameters(params)
-                hdrStaticInfoApplied = true
-                Log.i(TAG, "HDR10 static metadata applied (${blob.size} bytes)")
-            }.onFailure { Log.w(TAG, "setParameters(HDR_STATIC_INFO) failed: ${it.message}") }
         }
     }
 
