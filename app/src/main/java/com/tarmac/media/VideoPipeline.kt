@@ -1,14 +1,12 @@
 package com.tarmac.media
 
 import android.content.Context
-import android.hardware.display.DisplayManager
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
-import android.os.Build
 import android.os.SystemClock
 import android.util.Log
-import android.view.Display
 import android.view.Surface
 import com.tarmac.service.Prefs
 import com.tarmac.service.SessionStateBus
@@ -33,12 +31,21 @@ import java.util.concurrent.atomic.AtomicBoolean
  *      size, HDR color metadata, and (if seen) the HDR_STATIC_INFO blob, then
  *      flush the buffered NALUs and enter steady-state pass-through.
  *
+ * Phase 5b additions:
+ *  - Probes [MediaCodecList] for FEATURE_TunneledPlayback support when HEVC is
+ *    active and a valid [audioSessionId] is available.
+ *  - Sets KEY_AUDIO_SESSION_ID + KEY_FEATURE_TUNNELED_PLAYBACK so the codec
+ *    pipeline handles A/V sync in hardware.
+ *  - Falls back to non-tunneled configure if the codec rejects the tunneled
+ *    configuration (catches IllegalStateException / MediaCodec.CodecException).
+ *
  * HDR is applied only when the user opted in AND the display reports HDR10
  * support, so we don't send HDR metadata to a TV that can't render it.
  */
 class VideoPipeline(
     private val outputSurface: Surface,
     private val appContext: Context? = null,
+    private val audioSessionId: Int = 0,
 ) {
 
     companion object {
@@ -84,7 +91,9 @@ class VideoPipeline(
         val forceHevc = ctx?.let { Prefs.forceH265(it) } ?: false
         val hdrPrefOn = ctx?.let { Prefs.hdrEnabled(it) } ?: false
 
-        probeDisplayCapabilities(ctx)
+        val caps = DisplayCapabilities.probe(ctx)
+        displaySupportsHdr10 = caps.supportsHdr10
+        displaySupports4k = caps.supports4k
         hdrEnabled = hdrPrefOn && displaySupportsHdr10
 
         val effectiveHevc = useHevc || forceHevc
@@ -100,7 +109,8 @@ class VideoPipeline(
         Log.i(
             TAG,
             "VideoPipeline pending configure mime=$currentMime hdr=$hdrEnabled " +
-                "(prefOn=$hdrPrefOn displayHdr10=$displaySupportsHdr10 display4k=$displaySupports4k)",
+                "(prefOn=$hdrPrefOn displayHdr10=$displaySupportsHdr10 display4k=$displaySupports4k " +
+                "audioSessionId=$audioSessionId)",
         )
         publishStats(reset = true)
     }
@@ -164,11 +174,29 @@ class VideoPipeline(
     private fun configureAndFlush() {
         width = pendingWidth ?: FHD_W
         height = pendingHeight ?: FHD_H
-        val maxW = if (displaySupports4k) UHD_W else FHD_W
-        val maxH = if (displaySupports4k) UHD_H else FHD_H
         val hdrBlob = pendingHdrBlob
 
-        val format = MediaFormat.createVideoFormat(currentMime, width, height).apply {
+        codec = tryTunneledConfigure(hdrBlob) ?: configureStandard(hdrBlob)
+
+        Log.i(
+            TAG,
+            "VideoPipeline configured ${width}x${height} " +
+                "max=${if (displaySupports4k) UHD_W else FHD_W}x${if (displaySupports4k) UHD_H else FHD_H} " +
+                "hdr=$hdrEnabled hdrStaticInfo=${hdrBlob != null} queued=${pending.size}",
+        )
+        publishStats(reset = true)
+
+        while (pending.isNotEmpty()) {
+            val p = pending.removeFirst()
+            submitToCodec(ByteBuffer.wrap(p.bytes), p.bytes.size, p.ptsUs)
+        }
+    }
+
+    /** Builds the common MediaFormat keys shared by both tunneled and standard paths. */
+    private fun buildBaseFormat(hdrBlob: ByteArray?): MediaFormat {
+        val maxW = if (displaySupports4k) UHD_W else FHD_W
+        val maxH = if (displaySupports4k) UHD_H else FHD_H
+        return MediaFormat.createVideoFormat(currentMime, width, height).apply {
             setInteger(MediaFormat.KEY_FRAME_RATE, 60)
             setInteger(
                 MediaFormat.KEY_COLOR_FORMAT,
@@ -185,20 +213,58 @@ class VideoPipeline(
                 }
             }
         }
-        val c = MediaCodec.createDecoderByType(currentMime)
-        c.configure(format, outputSurface, null, 0)
-        c.start()
-        codec = c
-        Log.i(
-            TAG,
-            "VideoPipeline configured ${width}x${height} max=${maxW}x${maxH} " +
-                "hdr=$hdrEnabled hdrStaticInfo=${hdrBlob != null} queued=${pending.size}",
-        )
-        publishStats(reset = true)
+    }
 
-        while (pending.isNotEmpty()) {
-            val p = pending.removeFirst()
-            submitToCodec(ByteBuffer.wrap(p.bytes), p.bytes.size, p.ptsUs)
+    /**
+     * Attempts to configure a tunneled MediaCodec decoder.  Tunneling pairs the
+     * video decoder to the AudioTrack session so the codec pipeline handles A/V
+     * sync in hardware — lower latency and drift-free on devices that support it.
+     *
+     * Only attempted for HEVC when a valid [audioSessionId] is available.
+     * Returns null (caller falls back to [configureStandard]) if:
+     *  - Not HEVC, or no audio session yet.
+     *  - No HEVC decoder on the device supports FEATURE_TunneledPlayback.
+     *  - The chosen codec rejects the tunneled configure (illegal state or
+     *    codec error), indicating the feature is present in the codec list but
+     *    not actually usable in this configuration.
+     */
+    private fun tryTunneledConfigure(hdrBlob: ByteArray?): MediaCodec? {
+        if (currentMime != MediaFormat.MIMETYPE_VIDEO_HEVC || audioSessionId <= 0) return null
+
+        // Probe without touching baseFormat — findDecoderForFormat requires the
+        // feature to be set on the queried format.
+        val probeFormat = MediaFormat.createVideoFormat(currentMime, width, height).apply {
+            setFeatureEnabled(MediaCodecInfo.CodecCapabilities.FEATURE_TunneledPlayback, true)
+        }
+        if (MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(probeFormat) == null) {
+            Log.d(TAG, "No HEVC tunneled-playback decoder on this device; using non-tunneled")
+            return null
+        }
+
+        val format = buildBaseFormat(hdrBlob).apply {
+            setFeatureEnabled(MediaCodecInfo.CodecCapabilities.FEATURE_TunneledPlayback, true)
+            setInteger(MediaFormat.KEY_AUDIO_SESSION_ID, audioSessionId)
+        }
+        return try {
+            MediaCodec.createDecoderByType(currentMime).also {
+                it.configure(format, outputSurface, null, 0)
+                it.start()
+                Log.i(TAG, "Tunneled HEVC active (audioSessionId=$audioSessionId)")
+            }
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "Tunneled HEVC configure rejected (${e.message}); falling back to non-tunneled")
+            null
+        } catch (e: MediaCodec.CodecException) {
+            Log.w(TAG, "Tunneled HEVC configure rejected (${e.diagnosticInfo}); falling back to non-tunneled")
+            null
+        }
+    }
+
+    private fun configureStandard(hdrBlob: ByteArray?): MediaCodec {
+        val format = buildBaseFormat(hdrBlob)
+        return MediaCodec.createDecoderByType(currentMime).also {
+            it.configure(format, outputSurface, null, 0)
+            it.start()
         }
     }
 
@@ -225,28 +291,6 @@ class VideoPipeline(
             maybePublishStats()
         } catch (t: Throwable) {
             Log.w(TAG, "submit failed: ${t.message}")
-        }
-    }
-
-    private fun probeDisplayCapabilities(ctx: Context?) {
-        displaySupportsHdr10 = false
-        displaySupports4k = false
-        if (ctx == null) return
-        val dm = runCatching {
-            ctx.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
-        }.getOrNull() ?: return
-        val display = dm.getDisplay(Display.DEFAULT_DISPLAY) ?: return
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            // `supportedHdrTypes` is deprecated on API 34+ in favor of
-            // Display.Mode.getSupportedHdrTypes, but we need to support minSdk 26.
-            @Suppress("DEPRECATION")
-            val types = display.hdrCapabilities?.supportedHdrTypes
-            displaySupportsHdr10 = types?.any { it == Display.HdrCapabilities.HDR_TYPE_HDR10 } == true
-        }
-        displaySupports4k = display.supportedModes.any { mode ->
-            (mode.physicalWidth >= UHD_W && mode.physicalHeight >= UHD_H) ||
-                (mode.physicalWidth >= UHD_H && mode.physicalHeight >= UHD_W)
         }
     }
 

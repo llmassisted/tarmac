@@ -48,6 +48,9 @@ object AirPlayJni {
     @Volatile var videoPipeline: VideoPipeline? = null
     @Volatile var audioPipeline: AudioPipeline? = null
 
+    /** Audio session ID from AudioPipeline for tunneled video/audio pairing. */
+    @Volatile var audioSessionId: Int = 0
+
     external fun startServer(deviceName: String, hwAddr: ByteArray, features: Long, pin: Int): Int
     external fun stopServer()
     external fun nativeVersion(): String

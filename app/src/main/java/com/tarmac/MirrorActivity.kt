@@ -43,7 +43,7 @@ class MirrorActivity : FragmentActivity(), SurfaceHolder.Callback {
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        val p = VideoPipeline(holder.surface, applicationContext).also { it.start() }
+        val p = VideoPipeline(holder.surface, applicationContext, AirPlayJni.audioSessionId).also { it.start() }
         pipeline = p
         AirPlayJni.videoPipeline = p
     }
