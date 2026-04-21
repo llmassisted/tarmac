@@ -2,6 +2,7 @@ package com.tarmac.service
 
 import android.util.Log
 import com.tarmac.media.AudioPipeline
+import com.tarmac.media.DisplayCapabilities
 import com.tarmac.media.VideoPipeline
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicReference
@@ -50,6 +51,13 @@ object AirPlayJni {
 
     /** Audio session ID from AudioPipeline for tunneled video/audio pairing. */
     @Volatile var audioSessionId: Int = 0
+
+    /**
+     * Display capabilities probed once at session start by [TarmacService] and
+     * shared with [VideoPipeline] so codec config and Bonjour advertisement
+     * can't disagree if an external display is hotplugged mid-session.
+     */
+    @Volatile var displayCaps: DisplayCapabilities = DisplayCapabilities.UNKNOWN
 
     external fun startServer(deviceName: String, hwAddr: ByteArray, features: Long, pin: Int): Int
     external fun stopServer()

@@ -18,13 +18,15 @@ data class DisplayCapabilities(
         private const val UHD_LONG = 3840
         private const val UHD_SHORT = 2160
 
+        /** No-capability sentinel; safe default before the probe has run. */
+        val UNKNOWN = DisplayCapabilities(supportsHdr10 = false, supports4k = false)
+
         fun probe(ctx: Context?): DisplayCapabilities {
-            if (ctx == null) return DisplayCapabilities(supportsHdr10 = false, supports4k = false)
+            if (ctx == null) return UNKNOWN
             val dm = runCatching {
                 ctx.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
-            }.getOrNull() ?: return DisplayCapabilities(supportsHdr10 = false, supports4k = false)
-            val display = dm.getDisplay(Display.DEFAULT_DISPLAY)
-                ?: return DisplayCapabilities(supportsHdr10 = false, supports4k = false)
+            }.getOrNull() ?: return UNKNOWN
+            val display = dm.getDisplay(Display.DEFAULT_DISPLAY) ?: return UNKNOWN
 
             val supportsHdr10 = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 // `supportedHdrTypes` deprecated on API 34+ but needed for minSdk 26 compat.

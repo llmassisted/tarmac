@@ -34,8 +34,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Phase 5b additions:
  *  - Probes [MediaCodecList] for FEATURE_TunneledPlayback support when HEVC is
  *    active and a valid [audioSessionId] is available.
- *  - Sets KEY_AUDIO_SESSION_ID + KEY_FEATURE_TUNNELED_PLAYBACK so the codec
- *    pipeline handles A/V sync in hardware.
+ *  - Enables FEATURE_TunneledPlayback on the MediaFormat and sets
+ *    KEY_AUDIO_SESSION_ID so the codec pipeline handles A/V sync in hardware.
  *  - Falls back to non-tunneled configure if the codec rejects the tunneled
  *    configuration (catches IllegalStateException / MediaCodec.CodecException).
  *
@@ -46,6 +46,7 @@ class VideoPipeline(
     private val outputSurface: Surface,
     private val appContext: Context? = null,
     private val audioSessionId: Int = 0,
+    private val presetCaps: DisplayCapabilities? = null,
 ) {
 
     companion object {
@@ -91,7 +92,7 @@ class VideoPipeline(
         val forceHevc = ctx?.let { Prefs.forceH265(it) } ?: false
         val hdrPrefOn = ctx?.let { Prefs.hdrEnabled(it) } ?: false
 
-        val caps = DisplayCapabilities.probe(ctx)
+        val caps = presetCaps ?: DisplayCapabilities.probe(ctx)
         displaySupportsHdr10 = caps.supportsHdr10
         displaySupports4k = caps.supports4k
         hdrEnabled = hdrPrefOn && displaySupportsHdr10

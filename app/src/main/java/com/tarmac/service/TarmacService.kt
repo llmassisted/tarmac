@@ -85,6 +85,7 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         }
 
         val displayCaps = DisplayCapabilities.probe(applicationContext)
+        AirPlayJni.displayCaps = displayCaps
         val deviceName = resolveDeviceName()
         SessionStateBus.setDeviceName(deviceName)
         val hwAddr = deviceHwAddr()
