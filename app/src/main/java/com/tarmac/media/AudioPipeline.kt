@@ -45,6 +45,10 @@ class AudioPipeline(private val appContext: Context? = null) {
     @Volatile private var currentCt: Int = -1
     @Volatile private var alacUnsupportedLogged = false
 
+    /** AudioTrack session ID for tunneled video/audio pairing; 0 before start(). */
+    val audioSessionId: Int
+        get() = track?.audioSessionId ?: 0
+
     fun start() {
         if (!started.compareAndSet(false, true)) return
         track = buildAudioTrack().also { it.play() }

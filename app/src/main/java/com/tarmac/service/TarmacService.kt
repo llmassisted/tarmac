@@ -18,6 +18,7 @@ import com.tarmac.MirrorActivity
 import com.tarmac.R
 import com.tarmac.VideoPlayerActivity
 import com.tarmac.media.AudioPipeline
+import com.tarmac.media.DisplayCapabilities
 import kotlin.random.Random
 
 class TarmacService : LifecycleService(), AirPlayJni.Listener {
@@ -80,15 +81,18 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         audioPipeline = AudioPipeline(applicationContext).also {
             it.start()
             AirPlayJni.audioPipeline = it
+            AirPlayJni.audioSessionId = it.audioSessionId
         }
 
+        val displayCaps = DisplayCapabilities.probe(applicationContext)
+        AirPlayJni.displayCaps = displayCaps
         val deviceName = resolveDeviceName()
         SessionStateBus.setDeviceName(deviceName)
         val hwAddr = deviceHwAddr()
         val port = AirPlayJni.startServer(
             deviceName,
             hwAddr,
-            BonjourAdvertiser.FEATURES_DEFAULT,
+            FeatureBits.DEFAULT.value,
             currentPin.toInt(),
         )
         if (port < 0) {
@@ -107,7 +111,7 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         }
 
         bonjour = BonjourAdvertiser(this).also {
-            it.start(deviceName, hwAddr, advertisePort)
+            it.start(deviceName, hwAddr, advertisePort, displayCaps = displayCaps)
         }
 
         updateNotification(getString(R.string.service_running) + " — PIN $currentPin")
