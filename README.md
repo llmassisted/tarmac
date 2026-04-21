@@ -55,7 +55,7 @@ See [LICENSE](LICENSE) for the full text.
 ## Status
 
 - [x] Phase 1 — Android TV scaffolding + native build skeleton
-- [ ] Phase 2 — JNI bridge, MediaCodec video, AudioTrack audio, Bonjour
-- [ ] Phase 3 — Leanback UX (pairing PIN, status, settings)
-- [ ] Phase 4 — Extended display + AirPlay Video (ExoPlayer)
+- [x] Phase 2 — JNI bridge, MediaCodec video, AudioTrack audio, Bonjour
+- [x] Phase 3 — Leanback UX (pairing PIN, status, settings)
+- [x] Phase 4 — Extended display + AirPlay Video (ExoPlayer)
 - [ ] Phase 5 — 4K HEVC + HDR10 tunneling, endurance hardening
