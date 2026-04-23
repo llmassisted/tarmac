@@ -1,6 +1,7 @@
 package com.tarmac
 
 import android.os.Bundle
+import android.util.Log
 import android.view.WindowManager
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
@@ -17,6 +18,7 @@ import kotlinx.coroutines.launch
 class VideoPlayerActivity : FragmentActivity() {
 
     companion object {
+        private const val TAG = "VideoPlayerActivity"
         const val EXTRA_URL = "extra_url"
         const val EXTRA_START_SEC = "extra_start_sec"
     }
@@ -38,19 +40,34 @@ class VideoPlayerActivity : FragmentActivity() {
     }
 
     private fun initPlayer(url: String, startSec: Float) {
-        val exo = ExoPlayer.Builder(this).build().also { player = it }
+        val exo = try {
+            ExoPlayer.Builder(this).build().also { player = it }
+        } catch (t: Throwable) {
+            Log.w(TAG, "ExoPlayer init failed: ${t.message}")
+            finish()
+            return
+        }
         playerView.player = exo
 
         exo.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
+                // Unreachable URL or unsupported media: log and bail cleanly
+                // so the AirPlay session can return to IDLE on the Mac side
+                // without dragging the activity into an uninitialised state.
+                Log.w(TAG, "playback error code=${error.errorCode} msg=${error.message}")
                 finish()
             }
         })
 
-        exo.setMediaItem(MediaItem.fromUri(url))
-        exo.prepare()
-        if (startSec > 0f) exo.seekTo((startSec * 1000).toLong())
-        exo.playWhenReady = true
+        runCatching {
+            exo.setMediaItem(MediaItem.fromUri(url))
+            exo.prepare()
+            if (startSec > 0f) exo.seekTo((startSec * 1000).toLong())
+            exo.playWhenReady = true
+        }.onFailure {
+            Log.w(TAG, "media prepare failed: ${it.message}")
+            finish()
+        }
     }
 
     private fun observeVideoEvents() {

@@ -48,7 +48,10 @@ class MirrorActivity : FragmentActivity(), SurfaceHolder.Callback {
             applicationContext,
             AirPlayJni.audioSessionId,
             AirPlayJni.displayCaps,
-        ).also { it.start() }
+        ).also {
+            it.onFatalError = { SessionStateBus.reportPipelineFault("video") }
+            it.start()
+        }
         pipeline = p
         AirPlayJni.videoPipeline = p
     }
