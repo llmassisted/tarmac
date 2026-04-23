@@ -62,6 +62,14 @@ class VideoPipeline(
         // is ~260ms of startup buffering before we give up and configure in
         // whatever state we have.
         private const val MAX_PRECONFIG_SUBMITS = 16
+
+        /**
+         * Consecutive submit errors at which we give up on the current codec
+         * state and ask the service to restart the session. Covers the case
+         * where the codec has silently entered an error state without raising
+         * a non-recoverable CodecException.
+         */
+        private const val FATAL_ERROR_THRESHOLD = 10
     }
 
     private data class Pending(val bytes: ByteArray, val ptsUs: Long)
@@ -90,6 +98,14 @@ class VideoPipeline(
     @Volatile private var totalSubmits: Long = 0L
     @Volatile private var totalRenderedFrames: Long = 0L
     @Volatile private var totalDecoderErrors: Long = 0L
+    private var consecutiveSubmitErrors: Int = 0
+
+    /**
+     * Invoked once per fatal (non-recoverable) codec failure so the owning
+     * service can tear down and re-advertise rather than silently spinning on
+     * a dead codec. Set by TarmacService.
+     */
+    @Volatile var onFatalError: ((Throwable) -> Unit)? = null
 
     /** Snapshot used by TarmacService.dump. Thread-safe via @Volatile reads. */
     data class Stats(
@@ -317,10 +333,18 @@ class VideoPipeline(
             statsFrames += 1
             statsBytes += length
             totalSubmits += 1
+            consecutiveSubmitErrors = 0
             maybePublishStats()
         } catch (t: Throwable) {
             totalDecoderErrors += 1
+            consecutiveSubmitErrors += 1
             Log.w(TAG, "submit failed: ${t.message}")
+            val fatal = t is MediaCodec.CodecException && !t.isRecoverable ||
+                consecutiveSubmitErrors >= FATAL_ERROR_THRESHOLD
+            if (fatal) {
+                Log.e(TAG, "codec in unrecoverable state after $consecutiveSubmitErrors errors")
+                onFatalError?.invoke(t)
+            }
         }
     }
 

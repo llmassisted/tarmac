@@ -80,4 +80,17 @@ object SessionStateBus {
     val videoEvents: SharedFlow<VideoEvent> = _videoEvents.asSharedFlow()
 
     fun emitVideoEvent(event: VideoEvent) { _videoEvents.tryEmit(event) }
+
+    // --- Fatal pipeline errors — services subscribe to trigger a full restart ---
+
+    /**
+     * Emitted when an AudioPipeline / VideoPipeline determines its codec has
+     * entered an unrecoverable state (non-recoverable CodecException, or the
+     * error-rate threshold was exceeded). TarmacService responds by tearing
+     * down and re-advertising so the Mac can reconnect cleanly.
+     */
+    private val _pipelineFaults = MutableSharedFlow<String>(extraBufferCapacity = 2)
+    val pipelineFaults: SharedFlow<String> = _pipelineFaults.asSharedFlow()
+
+    fun reportPipelineFault(source: String) { _pipelineFaults.tryEmit(source) }
 }

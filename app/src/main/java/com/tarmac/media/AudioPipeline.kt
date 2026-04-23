@@ -37,6 +37,9 @@ class AudioPipeline(private val appContext: Context? = null) {
         private const val DEQUEUE_TIMEOUT_US = 5_000L
         private const val ALAC_MIME = "audio/alac"
         private const val DEFAULT_BUFFER_KB = 16
+
+        /** Consecutive submit errors before we ask the service to restart. */
+        private const val FATAL_ERROR_THRESHOLD = 20
     }
 
     private var codec: MediaCodec? = null
@@ -49,6 +52,10 @@ class AudioPipeline(private val appContext: Context? = null) {
     @Volatile private var totalFramesIn: Long = 0L
     @Volatile private var totalPcmBytesOut: Long = 0L
     @Volatile private var totalDecoderErrors: Long = 0L
+    private var consecutiveDecoderErrors: Int = 0
+
+    /** Invoked on a non-recoverable audio codec failure so the service can restart. */
+    @Volatile var onFatalError: ((Throwable) -> Unit)? = null
 
     /** AudioTrack session ID for tunneled video/audio pairing; 0 before start(). */
     val audioSessionId: Int
@@ -191,9 +198,17 @@ class AudioPipeline(private val appContext: Context? = null) {
                 c.releaseOutputBuffer(outIdx, false)
                 outIdx = c.dequeueOutputBuffer(info, 0)
             }
+            consecutiveDecoderErrors = 0
         } catch (t: Throwable) {
             totalDecoderErrors += 1
+            consecutiveDecoderErrors += 1
             Log.w(TAG, "submitEncoded failed: ${t.message}")
+            val fatal = t is MediaCodec.CodecException && !t.isRecoverable ||
+                consecutiveDecoderErrors >= FATAL_ERROR_THRESHOLD
+            if (fatal) {
+                Log.e(TAG, "audio codec unrecoverable after $consecutiveDecoderErrors errors")
+                onFatalError?.invoke(t)
+            }
         }
     }
 

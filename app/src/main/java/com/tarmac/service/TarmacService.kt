@@ -26,6 +26,7 @@ import java.io.FileDescriptor
 import java.io.PrintWriter
 import java.io.StringWriter
 import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceManager
 import com.tarmac.MirrorActivity
 import com.tarmac.R
@@ -33,6 +34,7 @@ import com.tarmac.VideoPlayerActivity
 import com.tarmac.media.AudioPipeline
 import com.tarmac.media.DisplayCapabilities
 import kotlin.random.Random
+import kotlinx.coroutines.launch
 
 class TarmacService : LifecycleService(), AirPlayJni.Listener {
 
@@ -112,6 +114,12 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         super.onCreate()
         serviceStartElapsedMs = SystemClock.elapsedRealtime()
         registerDumpReceiverIfDebug()
+        lifecycleScope.launch {
+            SessionStateBus.pipelineFaults.collect { source ->
+                Log.w(TAG, "pipeline fault from $source — restarting session")
+                restartAirPlay()
+            }
+        }
         val notification = buildNotification(getString(R.string.service_running))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -139,6 +147,7 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         SessionStateBus.setConnection(SessionStateBus.Connection.IDLE)
 
         audioPipeline = AudioPipeline(applicationContext).also {
+            it.onFatalError = { SessionStateBus.reportPipelineFault("audio") }
             it.start()
             AirPlayJni.audioPipeline = it
             AirPlayJni.audioSessionId = it.audioSessionId
