@@ -28,6 +28,13 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         private const val CHANNEL_ID = "tarmac_service"
         private const val NOTIFICATION_ID = 1
         private const val DEFAULT_DEVICE_NAME = "Tarmac"
+
+        /**
+         * Upper bound on a single streaming session. Long enough for a feature-
+         * length movie; short enough that a runaway bug can't hold the CPU
+         * awake indefinitely. Reset on every ACTIVE transition.
+         */
+        private const val WAKE_LOCK_TIMEOUT_MS = 4 * 60 * 60 * 1000L
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -102,14 +109,6 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         }
         val advertisePort = if (port > 0) port else 7000
 
-        if (wakeLock == null) {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Tarmac:airplay").apply {
-                setReferenceCounted(false)
-                acquire(8 * 60 * 60 * 1000L)
-            }
-        }
-
         bonjour = BonjourAdvertiser(this).also {
             it.start(deviceName, hwAddr, advertisePort, displayCaps = displayCaps)
         }
@@ -139,9 +138,30 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         PreferenceManager.getDefaultSharedPreferences(this)
             .unregisterOnSharedPreferenceChangeListener(prefListener)
         stopAirPlay()
-        wakeLock?.runCatching { if (isHeld) release() }
+        releaseSessionWakeLock()
         wakeLock = null
         super.onDestroy()
+    }
+
+    /**
+     * Hold a PARTIAL_WAKE_LOCK only while a client is actively streaming.
+     * The foreground service keeps the process alive regardless; this lock
+     * prevents the CPU from sleeping mid-frame. Acquired on session ACTIVE,
+     * released on IDLE so the TV can doze between sessions.
+     */
+    private fun acquireSessionWakeLock() {
+        val lock = wakeLock ?: run {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Tarmac:session").also {
+                it.setReferenceCounted(false)
+                wakeLock = it
+            }
+        }
+        if (!lock.isHeld) lock.acquire(WAKE_LOCK_TIMEOUT_MS)
+    }
+
+    private fun releaseSessionWakeLock() {
+        wakeLock?.runCatching { if (isHeld) release() }
     }
 
     // --- AirPlayJni.Listener ----------------------------------------------
@@ -159,6 +179,10 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
             AirPlayJni.SessionState.IDLE -> SessionStateBus.Connection.IDLE
         }
         SessionStateBus.setConnection(busState)
+        when (state) {
+            AirPlayJni.SessionState.ACTIVE -> acquireSessionWakeLock()
+            AirPlayJni.SessionState.IDLE -> releaseSessionWakeLock()
+        }
         if (state == AirPlayJni.SessionState.IDLE) SessionStateBus.clearMediaStats()
         updateNotification(
             when (state) {
