@@ -37,6 +37,14 @@ namespace {
 // JavaVM cached at JNI_OnLoad so native callbacks can reach back into Kotlin.
 JavaVM* g_vm = nullptr;
 // Global ref to the Java-side AirPlayJni singleton object (target of callbacks).
+//
+// Callback-thread access rules (see CallbackScope below):
+//   - Read + dispatch:  holds g_callback_mutex shared; checks g_callback_obj.
+//   - Replace / clear:  holds g_callback_mutex exclusively; waits for in-flight
+//                       callbacks to drain before DeleteGlobalRef'ing.
+// This prevents a use-after-free when stopServer runs while a RAOP worker is
+// mid-callback, which is otherwise trivially observable at session teardown.
+std::mutex g_callback_mutex;
 jobject g_callback_obj = nullptr;
 // Pre-resolved Java method IDs for the most-used callbacks. Kept null when
 // libairplay is off.
@@ -55,69 +63,90 @@ raop_t* g_raop = nullptr;
 dnssd_t* g_dnssd = nullptr;
 #endif
 
-JNIEnv* attach_env(bool* should_detach) {
+/**
+ * RAII guard around a JNI callback into the Java side.
+ *
+ * Responsibilities:
+ *  1. Hold [g_callback_mutex] for the duration of the callback so stopServer
+ *     cannot DeleteGlobalRef the target object mid-dispatch.
+ *  2. Attach the current thread to the VM if needed; detach on destruction if
+ *     (and only if) we were the ones who attached it.  This eliminates the
+ *     thread-attach leak that the pre-existing early-return `if (!env || !g_…
+ *     ) return;` pattern could cause when the callback target disappeared
+ *     between AttachCurrentThread and the null check.
+ *  3. Expose [ok()] so the caller can skip dispatch when the Java side is
+ *     torn down.
+ */
+struct CallbackScope {
+    std::unique_lock<std::mutex> lock;
     JNIEnv* env = nullptr;
-    *should_detach = false;
-    if (!g_vm) return nullptr;
-    int rc = g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
-    if (rc == JNI_EDETACHED) {
-        if (g_vm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
-            *should_detach = true;
-        } else {
-            return nullptr;
+    bool should_detach = false;
+
+    CallbackScope() : lock(g_callback_mutex) {
+        if (!g_vm) return;
+        int rc = g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+        if (rc == JNI_EDETACHED) {
+            if (g_vm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+                should_detach = true;
+            } else {
+                env = nullptr;
+            }
+        } else if (rc != JNI_OK) {
+            env = nullptr;
         }
-    } else if (rc != JNI_OK) {
-        return nullptr;
     }
-    return env;
-}
+
+    ~CallbackScope() {
+        if (should_detach && g_vm) {
+            g_vm->DetachCurrentThread();
+        }
+    }
+
+    CallbackScope(const CallbackScope&) = delete;
+    CallbackScope& operator=(const CallbackScope&) = delete;
+
+    /** True when we have an env AND the Java-side target is still registered. */
+    bool ok() const { return env != nullptr && g_callback_obj != nullptr; }
+};
 
 #ifdef HAVE_LIBAIRPLAY
 // --- UxPlay-style callbacks. Each forwards into the Java AirPlayJni object. -
 
 void cb_video_process(void* /*cls*/, raop_ntp_t* /*ntp*/, video_decode_struct* data) {
     if (!data || !data->data || data->data_len <= 0) return;
-    bool detach = false;
-    JNIEnv* env = attach_env(&detach);
-    if (!env || !g_callback_obj || !g_mid_on_video_data) return;
-    jobject buf = env->NewDirectByteBuffer(data->data, data->data_len);
-    env->CallVoidMethod(g_callback_obj, g_mid_on_video_data,
-                        buf, data->data_len, (jboolean) data->is_h265,
-                        (jlong) data->ntp_time_local);
-    env->DeleteLocalRef(buf);
-    if (detach) g_vm->DetachCurrentThread();
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_on_video_data) return;
+    jobject buf = scope.env->NewDirectByteBuffer(data->data, data->data_len);
+    scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_data,
+                              buf, data->data_len, (jboolean) data->is_h265,
+                              (jlong) data->ntp_time_local);
+    scope.env->DeleteLocalRef(buf);
 }
 
 void cb_audio_process(void* /*cls*/, raop_ntp_t* /*ntp*/, audio_decode_struct* data) {
     if (!data || !data->data || data->data_len <= 0) return;
-    bool detach = false;
-    JNIEnv* env = attach_env(&detach);
-    if (!env || !g_callback_obj || !g_mid_on_audio_data) return;
-    jobject buf = env->NewDirectByteBuffer(data->data, data->data_len);
-    env->CallVoidMethod(g_callback_obj, g_mid_on_audio_data,
-                        buf, data->data_len, (jint) data->ct,
-                        (jlong) data->ntp_time_local);
-    env->DeleteLocalRef(buf);
-    if (detach) g_vm->DetachCurrentThread();
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_on_audio_data) return;
+    jobject buf = scope.env->NewDirectByteBuffer(data->data, data->data_len);
+    scope.env->CallVoidMethod(g_callback_obj, g_mid_on_audio_data,
+                              buf, data->data_len, (jint) data->ct,
+                              (jlong) data->ntp_time_local);
+    scope.env->DeleteLocalRef(buf);
 }
 
 void cb_display_pin(void* /*cls*/, char* pin) {
     if (!pin) return;
-    bool detach = false;
-    JNIEnv* env = attach_env(&detach);
-    if (!env || !g_callback_obj || !g_mid_on_pin_display) return;
-    jstring s = env->NewStringUTF(pin);
-    env->CallVoidMethod(g_callback_obj, g_mid_on_pin_display, s);
-    env->DeleteLocalRef(s);
-    if (detach) g_vm->DetachCurrentThread();
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_on_pin_display) return;
+    jstring s = scope.env->NewStringUTF(pin);
+    scope.env->CallVoidMethod(g_callback_obj, g_mid_on_pin_display, s);
+    scope.env->DeleteLocalRef(s);
 }
 
 void notify_session_state(int state) {
-    bool detach = false;
-    JNIEnv* env = attach_env(&detach);
-    if (!env || !g_callback_obj || !g_mid_on_session_state) return;
-    env->CallVoidMethod(g_callback_obj, g_mid_on_session_state, (jint) state);
-    if (detach) g_vm->DetachCurrentThread();
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_on_session_state) return;
+    scope.env->CallVoidMethod(g_callback_obj, g_mid_on_session_state, (jint) state);
 }
 
 void cb_conn_init(void* /*cls*/)    { notify_session_state(1); }
@@ -126,37 +155,29 @@ void cb_conn_reset(void* /*cls*/, int /*reason*/) { notify_session_state(0); }
 
 void cb_video_play(void* /*cls*/, const char* location, const float start_position) {
     if (!location) return;
-    bool detach = false;
-    JNIEnv* env = attach_env(&detach);
-    if (!env || !g_callback_obj || !g_mid_on_video_play) return;
-    jstring s = env->NewStringUTF(location);
-    env->CallVoidMethod(g_callback_obj, g_mid_on_video_play, s, (jfloat) start_position);
-    env->DeleteLocalRef(s);
-    if (detach) g_vm->DetachCurrentThread();
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_on_video_play) return;
+    jstring s = scope.env->NewStringUTF(location);
+    scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_play, s, (jfloat) start_position);
+    scope.env->DeleteLocalRef(s);
 }
 
 void cb_video_stop(void* /*cls*/) {
-    bool detach = false;
-    JNIEnv* env = attach_env(&detach);
-    if (!env || !g_callback_obj || !g_mid_on_video_stop) return;
-    env->CallVoidMethod(g_callback_obj, g_mid_on_video_stop);
-    if (detach) g_vm->DetachCurrentThread();
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_on_video_stop) return;
+    scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_stop);
 }
 
 void cb_video_rate(void* /*cls*/, const float rate) {
-    bool detach = false;
-    JNIEnv* env = attach_env(&detach);
-    if (!env || !g_callback_obj || !g_mid_on_video_rate) return;
-    env->CallVoidMethod(g_callback_obj, g_mid_on_video_rate, (jfloat) rate);
-    if (detach) g_vm->DetachCurrentThread();
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_on_video_rate) return;
+    scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_rate, (jfloat) rate);
 }
 
 void cb_video_scrub(void* /*cls*/, const float position) {
-    bool detach = false;
-    JNIEnv* env = attach_env(&detach);
-    if (!env || !g_callback_obj || !g_mid_on_video_scrub) return;
-    env->CallVoidMethod(g_callback_obj, g_mid_on_video_scrub, (jfloat) position);
-    if (detach) g_vm->DetachCurrentThread();
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_on_video_scrub) return;
+    scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_scrub, (jfloat) position);
 }
 
 void cb_log(void* /*cls*/, int level, const char* msg) {
@@ -200,12 +221,15 @@ Java_com_tarmac_service_AirPlayJni_startServer(
     LOGI("startServer(name=%s, hwLen=%d, features=0x%llx, pin=%d)",
          name ? name : "(null)", (int) hwLen, (long long) features, pin);
 
-    if (g_callback_obj) {
-        env->DeleteGlobalRef(g_callback_obj);
-        g_callback_obj = nullptr;
+    {
+        std::lock_guard<std::mutex> cb_lock(g_callback_mutex);
+        if (g_callback_obj) {
+            env->DeleteGlobalRef(g_callback_obj);
+            g_callback_obj = nullptr;
+        }
+        g_callback_obj = env->NewGlobalRef(thiz);
+        resolve_callback_methods(env, thiz);
     }
-    g_callback_obj = env->NewGlobalRef(thiz);
-    resolve_callback_methods(env, thiz);
 
 #ifdef HAVE_LIBAIRPLAY
     std::lock_guard<std::mutex> lock(g_raop_mutex);
@@ -317,18 +341,25 @@ Java_com_tarmac_service_AirPlayJni_stopServer(JNIEnv* env, jobject /*thiz*/) {
         }
     }
 #endif
-    if (g_callback_obj) {
-        env->DeleteGlobalRef(g_callback_obj);
-        g_callback_obj = nullptr;
+    // Take the callback mutex exclusively so any RAOP worker thread that is
+    // mid-callback finishes before we DeleteGlobalRef the target object.
+    // Without this, stopServer can race a 60fps video callback and the next
+    // CallVoidMethod fires on a deleted global ref.
+    {
+        std::lock_guard<std::mutex> cb_lock(g_callback_mutex);
+        if (g_callback_obj) {
+            env->DeleteGlobalRef(g_callback_obj);
+            g_callback_obj = nullptr;
+        }
+        g_mid_on_video_data    = nullptr;
+        g_mid_on_audio_data    = nullptr;
+        g_mid_on_pin_display   = nullptr;
+        g_mid_on_session_state = nullptr;
+        g_mid_on_video_play    = nullptr;
+        g_mid_on_video_stop    = nullptr;
+        g_mid_on_video_rate    = nullptr;
+        g_mid_on_video_scrub   = nullptr;
     }
-    g_mid_on_video_data    = nullptr;
-    g_mid_on_audio_data    = nullptr;
-    g_mid_on_pin_display   = nullptr;
-    g_mid_on_session_state = nullptr;
-    g_mid_on_video_play    = nullptr;
-    g_mid_on_video_stop    = nullptr;
-    g_mid_on_video_rate    = nullptr;
-    g_mid_on_video_scrub   = nullptr;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
