@@ -86,6 +86,32 @@ class VideoPipeline(
     private var statsFrames: Int = 0
     private var statsBytes: Int = 0
 
+    // Cumulative counters for dumpsys / debug-intent diagnostics.
+    @Volatile private var totalSubmits: Long = 0L
+    @Volatile private var totalRenderedFrames: Long = 0L
+    @Volatile private var totalDecoderErrors: Long = 0L
+
+    /** Snapshot used by TarmacService.dump. Thread-safe via @Volatile reads. */
+    data class Stats(
+        val mime: String,
+        val width: Int,
+        val height: Int,
+        val hdrActive: Boolean,
+        val totalSubmits: Long,
+        val totalRenderedFrames: Long,
+        val totalDecoderErrors: Long,
+    )
+
+    fun stats() = Stats(
+        mime = currentMime,
+        width = width,
+        height = height,
+        hdrActive = hdrEnabled,
+        totalSubmits = totalSubmits,
+        totalRenderedFrames = totalRenderedFrames,
+        totalDecoderErrors = totalDecoderErrors,
+    )
+
     fun start(useHevc: Boolean = false) {
         if (!started.compareAndSet(false, true)) return
         val ctx = appContext
@@ -285,12 +311,15 @@ class VideoPipeline(
             var outIdx = c.dequeueOutputBuffer(info, 0)
             while (outIdx >= 0) {
                 c.releaseOutputBuffer(outIdx, /*render*/true)
+                totalRenderedFrames += 1
                 outIdx = c.dequeueOutputBuffer(info, 0)
             }
             statsFrames += 1
             statsBytes += length
+            totalSubmits += 1
             maybePublishStats()
         } catch (t: Throwable) {
+            totalDecoderErrors += 1
             Log.w(TAG, "submit failed: ${t.message}")
         }
     }

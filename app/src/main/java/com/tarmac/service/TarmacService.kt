@@ -3,9 +3,12 @@ package com.tarmac.service
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -16,8 +19,12 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import java.io.FileDescriptor
+import java.io.PrintWriter
+import java.io.StringWriter
 import androidx.lifecycle.LifecycleService
 import androidx.preference.PreferenceManager
 import com.tarmac.MirrorActivity
@@ -48,6 +55,14 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
          * re-advertise so we don't thrash NsdManager.
          */
         private const val NET_CHANGE_DEBOUNCE_MS = 750L
+
+        /**
+         * Debug-only broadcast that prints the same diagnostics as
+         * `dumpsys activity service com.tarmac/.service.TarmacService` to
+         * logcat. Registered NOT_EXPORTED; fire with:
+         *   adb shell am broadcast -p com.tarmac -a com.tarmac.action.DUMP_STATS
+         */
+        const val ACTION_DUMP_STATS = "com.tarmac.action.DUMP_STATS"
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -74,6 +89,11 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
 
     private val reregisterBonjourTask = Runnable { reregisterBonjour() }
 
+    @Volatile private var serviceStartElapsedMs: Long = 0L
+    @Volatile private var sessionActiveStartElapsedMs: Long = 0L
+    @Volatile private var totalSessionActivations: Long = 0L
+    private var dumpReceiver: BroadcastReceiver? = null
+
     /**
      * When the user changes device name from Settings while the service is
      * running, restart the AirPlay server so the new name is reflected in the
@@ -90,6 +110,8 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
 
     override fun onCreate() {
         super.onCreate()
+        serviceStartElapsedMs = SystemClock.elapsedRealtime()
+        registerDumpReceiverIfDebug()
         val notification = buildNotification(getString(R.string.service_running))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -173,10 +195,91 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
     override fun onDestroy() {
         PreferenceManager.getDefaultSharedPreferences(this)
             .unregisterOnSharedPreferenceChangeListener(prefListener)
+        dumpReceiver?.let { runCatching { unregisterReceiver(it) } }
+        dumpReceiver = null
         stopAirPlay()
         releaseSessionWakeLock()
         wakeLock = null
         super.onDestroy()
+    }
+
+    override fun dump(fd: FileDescriptor?, writer: PrintWriter, args: Array<out String>?) {
+        writeDiagnostics(writer)
+    }
+
+    /**
+     * Register a NOT_EXPORTED receiver so a developer can request a stats dump
+     * to logcat without hooking `dumpsys`. No-op on non-debuggable builds.
+     */
+    private fun registerDumpReceiverIfDebug() {
+        if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
+        val rcv = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != ACTION_DUMP_STATS) return
+                val buf = StringWriter()
+                writeDiagnostics(PrintWriter(buf))
+                buf.toString().lineSequence().forEach { Log.i(TAG, it) }
+            }
+        }
+        val filter = IntentFilter(ACTION_DUMP_STATS)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(rcv, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(rcv, filter)
+        }
+        dumpReceiver = rcv
+        Log.i(TAG, "debug dump receiver registered ($ACTION_DUMP_STATS)")
+    }
+
+    private fun writeDiagnostics(w: PrintWriter) {
+        val now = SystemClock.elapsedRealtime()
+        val uptimeMs = now - serviceStartElapsedMs
+        val sessionMs = if (sessionActiveStartElapsedMs > 0L) now - sessionActiveStartElapsedMs else 0L
+        w.println("Tarmac service diagnostics")
+        w.println("  uptime              : ${formatDuration(uptimeMs)}")
+        w.println("  session             : $sessionState ($totalSessionActivations total)")
+        w.println("  current session for : ${formatDuration(sessionMs)}")
+        w.println("  wakelock held       : ${wakeLock?.isHeld == true}")
+        w.println("  bonjour advertising : ${bonjour != null}")
+        w.println("  network callback    : ${networkCallback != null}")
+        w.println("  device name / pin   : ${lastBonjourArgs?.deviceName} / $currentPin")
+        val caps = AirPlayJni.displayCaps
+        w.println("  display caps        : 4k=${caps.supports4k} hdr10=${caps.supportsHdr10}")
+
+        AirPlayJni.videoPipeline?.stats()?.let { s ->
+            w.println("Video pipeline")
+            w.println("  mime                : ${s.mime}")
+            w.println("  size                : ${s.width}x${s.height}")
+            w.println("  hdr active          : ${s.hdrActive}")
+            w.println("  submits             : ${s.totalSubmits}")
+            w.println("  rendered frames     : ${s.totalRenderedFrames}")
+            w.println("  decoder errors      : ${s.totalDecoderErrors}")
+        } ?: w.println("Video pipeline      : (inactive)")
+
+        AirPlayJni.audioPipeline?.stats()?.let { s ->
+            w.println("Audio pipeline")
+            w.println("  codec               : ${s.codecLabel}")
+            w.println("  audio session id    : ${s.audioSessionId}")
+            w.println("  frames in           : ${s.totalFramesIn}")
+            w.println("  pcm bytes out       : ${s.totalPcmBytesOut}")
+            w.println("  underruns           : ${s.underrunCount}")
+            w.println("  decoder errors      : ${s.totalDecoderErrors}")
+        } ?: w.println("Audio pipeline      : (inactive)")
+        w.flush()
+    }
+
+    private fun formatDuration(ms: Long): String {
+        if (ms <= 0) return "0s"
+        val totalSec = ms / 1000
+        val h = totalSec / 3600
+        val m = (totalSec % 3600) / 60
+        val s = totalSec % 60
+        return buildString {
+            if (h > 0) append("${h}h ")
+            if (h > 0 || m > 0) append("${m}m ")
+            append("${s}s")
+        }
     }
 
     /**
@@ -273,8 +376,15 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         }
         SessionStateBus.setConnection(busState)
         when (state) {
-            AirPlayJni.SessionState.ACTIVE -> acquireSessionWakeLock()
-            AirPlayJni.SessionState.IDLE -> releaseSessionWakeLock()
+            AirPlayJni.SessionState.ACTIVE -> {
+                acquireSessionWakeLock()
+                sessionActiveStartElapsedMs = SystemClock.elapsedRealtime()
+                totalSessionActivations += 1
+            }
+            AirPlayJni.SessionState.IDLE -> {
+                releaseSessionWakeLock()
+                sessionActiveStartElapsedMs = 0L
+            }
         }
         if (state == AirPlayJni.SessionState.IDLE) SessionStateBus.clearMediaStats()
         updateNotification(

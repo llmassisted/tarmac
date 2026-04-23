@@ -45,9 +45,42 @@ class AudioPipeline(private val appContext: Context? = null) {
     @Volatile private var currentCt: Int = -1
     @Volatile private var alacUnsupportedLogged = false
 
+    // Cumulative counters for dumpsys / debug-intent diagnostics.
+    @Volatile private var totalFramesIn: Long = 0L
+    @Volatile private var totalPcmBytesOut: Long = 0L
+    @Volatile private var totalDecoderErrors: Long = 0L
+
     /** AudioTrack session ID for tunneled video/audio pairing; 0 before start(). */
     val audioSessionId: Int
         get() = track?.audioSessionId ?: 0
+
+    /** Snapshot used by TarmacService.dump. Reads AudioTrack.underrunCount when available. */
+    data class Stats(
+        val codecLabel: String,
+        val audioSessionId: Int,
+        val totalFramesIn: Long,
+        val totalPcmBytesOut: Long,
+        val totalDecoderErrors: Long,
+        val underrunCount: Int,
+    )
+
+    fun stats(): Stats {
+        val underruns = track?.let {
+            runCatching {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    it.underrunCount
+                } else -1
+            }.getOrDefault(-1)
+        } ?: -1
+        return Stats(
+            codecLabel = audioCodecLabel(currentCt),
+            audioSessionId = audioSessionId,
+            totalFramesIn = totalFramesIn,
+            totalPcmBytesOut = totalPcmBytesOut,
+            totalDecoderErrors = totalDecoderErrors,
+            underrunCount = underruns,
+        )
+    }
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -69,6 +102,7 @@ class AudioPipeline(private val appContext: Context? = null) {
         if (compressionType != currentCt) {
             reconfigureCodec(compressionType)
         }
+        totalFramesIn += 1
         when (compressionType) {
             8 -> submitPcm(direct, length)
             else -> submitEncoded(direct, length, ntpTimeLocal)
@@ -152,11 +186,13 @@ class AudioPipeline(private val appContext: Context? = null) {
                     outBuf.position(info.offset)
                     outBuf.get(pcm, 0, info.size)
                     track?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
+                    totalPcmBytesOut += pcm.size.toLong()
                 }
                 c.releaseOutputBuffer(outIdx, false)
                 outIdx = c.dequeueOutputBuffer(info, 0)
             }
         } catch (t: Throwable) {
+            totalDecoderErrors += 1
             Log.w(TAG, "submitEncoded failed: ${t.message}")
         }
     }
@@ -167,6 +203,7 @@ class AudioPipeline(private val appContext: Context? = null) {
         direct.limit(length)
         direct.get(pcm)
         track?.write(pcm, 0, length, AudioTrack.WRITE_NON_BLOCKING)
+        totalPcmBytesOut += length.toLong()
     }
 
     private fun audioCodecLabel(ct: Int): String = when (ct) {
