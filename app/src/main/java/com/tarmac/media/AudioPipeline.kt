@@ -13,6 +13,7 @@ import com.tarmac.service.Prefs
 import com.tarmac.service.SessionStateBus
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Decodes UxPlay's RAOP audio frames (AAC-ELD / ALAC / PCM) and pushes PCM to
@@ -48,10 +49,12 @@ class AudioPipeline(private val appContext: Context? = null) {
     @Volatile private var currentCt: Int = -1
     @Volatile private var alacUnsupportedLogged = false
 
-    // Cumulative counters for dumpsys / debug-intent diagnostics.
-    @Volatile private var totalFramesIn: Long = 0L
-    @Volatile private var totalPcmBytesOut: Long = 0L
-    @Volatile private var totalDecoderErrors: Long = 0L
+    // Cumulative counters for dumpsys / debug-intent diagnostics. Atomic because
+    // submit() is driven from RAOP worker threads; plain @Volatile is not safe
+    // for RMW (`+= 1`) under concurrent callers.
+    private val totalFramesIn = AtomicLong(0L)
+    private val totalPcmBytesOut = AtomicLong(0L)
+    private val totalDecoderErrors = AtomicLong(0L)
     private var consecutiveDecoderErrors: Int = 0
 
     /** Invoked on a non-recoverable audio codec failure so the service can restart. */
@@ -82,9 +85,9 @@ class AudioPipeline(private val appContext: Context? = null) {
         return Stats(
             codecLabel = audioCodecLabel(currentCt),
             audioSessionId = audioSessionId,
-            totalFramesIn = totalFramesIn,
-            totalPcmBytesOut = totalPcmBytesOut,
-            totalDecoderErrors = totalDecoderErrors,
+            totalFramesIn = totalFramesIn.get(),
+            totalPcmBytesOut = totalPcmBytesOut.get(),
+            totalDecoderErrors = totalDecoderErrors.get(),
             underrunCount = underruns,
         )
     }
@@ -109,7 +112,7 @@ class AudioPipeline(private val appContext: Context? = null) {
         if (compressionType != currentCt) {
             reconfigureCodec(compressionType)
         }
-        totalFramesIn += 1
+        totalFramesIn.incrementAndGet()
         when (compressionType) {
             8 -> submitPcm(direct, length)
             else -> submitEncoded(direct, length, ntpTimeLocal)
@@ -193,14 +196,14 @@ class AudioPipeline(private val appContext: Context? = null) {
                     outBuf.position(info.offset)
                     outBuf.get(pcm, 0, info.size)
                     track?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
-                    totalPcmBytesOut += pcm.size.toLong()
+                    totalPcmBytesOut.addAndGet(pcm.size.toLong())
                 }
                 c.releaseOutputBuffer(outIdx, false)
                 outIdx = c.dequeueOutputBuffer(info, 0)
             }
             consecutiveDecoderErrors = 0
         } catch (t: Throwable) {
-            totalDecoderErrors += 1
+            totalDecoderErrors.incrementAndGet()
             consecutiveDecoderErrors += 1
             Log.w(TAG, "submitEncoded failed: ${t.message}")
             val fatal = t is MediaCodec.CodecException && !t.isRecoverable ||
@@ -218,7 +221,7 @@ class AudioPipeline(private val appContext: Context? = null) {
         direct.limit(length)
         direct.get(pcm)
         track?.write(pcm, 0, length, AudioTrack.WRITE_NON_BLOCKING)
-        totalPcmBytesOut += length.toLong()
+        totalPcmBytesOut.addAndGet(length.toLong())
     }
 
     private fun audioCodecLabel(ct: Int): String = when (ct) {

@@ -34,7 +34,9 @@ import com.tarmac.VideoPlayerActivity
 import com.tarmac.media.AudioPipeline
 import com.tarmac.media.DisplayCapabilities
 import kotlin.random.Random
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class TarmacService : LifecycleService(), AirPlayJni.Listener {
 
@@ -67,7 +69,12 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         const val ACTION_DUMP_STATS = "com.tarmac.action.DUMP_STATS"
     }
 
-    private var wakeLock: PowerManager.WakeLock? = null
+    // wakeLock is touched from both the JNI callback thread (onSessionState)
+    // and the main thread (onDestroy). @Volatile gives us the visibility we
+    // need; the acquire/release calls are idempotent so torn writes aren't a
+    // concern, but without @Volatile a racing session start could observe a
+    // null and create a second WakeLock.
+    @Volatile private var wakeLock: PowerManager.WakeLock? = null
     private var bonjour: BonjourAdvertiser? = null
     private var audioPipeline: AudioPipeline? = null
     @Volatile private var currentPin: String = ""
@@ -89,7 +96,12 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
     )
     @Volatile private var lastBonjourArgs: BonjourArgs? = null
 
-    private val reregisterBonjourTask = Runnable { reregisterBonjour() }
+    private val reregisterBonjourTask = Runnable {
+        // Hop off the main thread for the actual NsdManager IPC — StrictMode's
+        // detectNetwork() would otherwise flag this. The debounce itself runs
+        // on main so the remove+post pair is race-free.
+        lifecycleScope.launch { withContext(Dispatchers.IO) { reregisterBonjour() } }
+    }
 
     @Volatile private var serviceStartElapsedMs: Long = 0L
     @Volatile private var sessionActiveStartElapsedMs: Long = 0L
@@ -140,6 +152,7 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         return START_STICKY
     }
 
+    @Synchronized
     private fun startAirPlay() {
         AirPlayJni.setListener(this)
         currentPin = "%04d".format(Random.nextInt(0, 10_000))
@@ -181,6 +194,7 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         updateNotification(getString(R.string.service_running) + " — PIN $currentPin")
     }
 
+    @Synchronized
     private fun stopAirPlay() {
         unregisterNetworkCallback()
         lastBonjourArgs = null
@@ -206,6 +220,10 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
             .unregisterOnSharedPreferenceChangeListener(prefListener)
         dumpReceiver?.let { runCatching { unregisterReceiver(it) } }
         dumpReceiver = null
+        // Belt-and-suspenders: stopAirPlay() already clears this, but if the
+        // service is destroyed via a path that skips it, a queued re-advertise
+        // could otherwise fire after teardown.
+        mainHandler.removeCallbacks(reregisterBonjourTask)
         stopAirPlay()
         releaseSessionWakeLock()
         wakeLock = null
@@ -358,7 +376,13 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         mainHandler.postDelayed(reregisterBonjourTask, NET_CHANGE_DEBOUNCE_MS)
     }
 
+    @Synchronized
     private fun reregisterBonjour() {
+        // Runs on Dispatchers.IO. @Synchronized (shared with startAirPlay /
+        // stopAirPlay) serializes us against a concurrent teardown or start so
+        // we don't stomp on a fresh advertisement or resurrect one after
+        // stopAirPlay cleared lastBonjourArgs. The lock is on `this`; the
+        // three functions form a single critical section.
         val args = lastBonjourArgs ?: return
         Log.i(TAG, "re-advertising Bonjour after network change")
         bonjour?.stop()

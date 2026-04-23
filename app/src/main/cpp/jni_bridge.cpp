@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 
 #define LOG_TAG "tarmac-native"
@@ -39,12 +40,21 @@ JavaVM* g_vm = nullptr;
 // Global ref to the Java-side AirPlayJni singleton object (target of callbacks).
 //
 // Callback-thread access rules (see CallbackScope below):
-//   - Read + dispatch:  holds g_callback_mutex shared; checks g_callback_obj.
-//   - Replace / clear:  holds g_callback_mutex exclusively; waits for in-flight
-//                       callbacks to drain before DeleteGlobalRef'ing.
+//   - Read + dispatch:  holds g_callback_mutex shared; multiple callbacks may
+//                       dispatch concurrently (audio on its worker, video on
+//                       its worker — both need to run in parallel to keep up
+//                       with 60fps + 44.1kHz).
+//   - Replace / clear:  holds g_callback_mutex exclusively; blocks until every
+//                       in-flight callback has released its shared lock before
+//                       DeleteGlobalRef'ing the target.
 // This prevents a use-after-free when stopServer runs while a RAOP worker is
 // mid-callback, which is otherwise trivially observable at session teardown.
-std::mutex g_callback_mutex;
+// shared_mutex (instead of plain mutex) means the callback path serializes
+// only against start/stopServer, not against other callbacks.
+//
+// Callbacks holding this lock must stay lock-free-fast on the Java side —
+// blocking inside CallVoidMethod would stall stopServer for the same duration.
+std::shared_mutex g_callback_mutex;
 jobject g_callback_obj = nullptr;
 // Pre-resolved Java method IDs for the most-used callbacks. Kept null when
 // libairplay is off.
@@ -67,8 +77,11 @@ dnssd_t* g_dnssd = nullptr;
  * RAII guard around a JNI callback into the Java side.
  *
  * Responsibilities:
- *  1. Hold [g_callback_mutex] for the duration of the callback so stopServer
- *     cannot DeleteGlobalRef the target object mid-dispatch.
+ *  1. Hold [g_callback_mutex] in *shared* mode for the duration of the
+ *     callback so stopServer cannot DeleteGlobalRef the target object
+ *     mid-dispatch. Multiple callbacks (audio + video workers) may hold the
+ *     shared lock simultaneously; start/stopServer take it exclusively and
+ *     therefore block until every in-flight callback releases.
  *  2. Attach the current thread to the VM if needed; detach on destruction if
  *     (and only if) we were the ones who attached it.  This eliminates the
  *     thread-attach leak that the pre-existing early-return `if (!env || !g_…
@@ -78,7 +91,7 @@ dnssd_t* g_dnssd = nullptr;
  *     torn down.
  */
 struct CallbackScope {
-    std::unique_lock<std::mutex> lock;
+    std::shared_lock<std::shared_mutex> lock;
     JNIEnv* env = nullptr;
     bool should_detach = false;
 
@@ -222,7 +235,7 @@ Java_com_tarmac_service_AirPlayJni_startServer(
          name ? name : "(null)", (int) hwLen, (long long) features, pin);
 
     {
-        std::lock_guard<std::mutex> cb_lock(g_callback_mutex);
+        std::unique_lock<std::shared_mutex> cb_lock(g_callback_mutex);
         if (g_callback_obj) {
             env->DeleteGlobalRef(g_callback_obj);
             g_callback_obj = nullptr;
@@ -346,7 +359,7 @@ Java_com_tarmac_service_AirPlayJni_stopServer(JNIEnv* env, jobject /*thiz*/) {
     // Without this, stopServer can race a 60fps video callback and the next
     // CallVoidMethod fires on a deleted global ref.
     {
-        std::lock_guard<std::mutex> cb_lock(g_callback_mutex);
+        std::unique_lock<std::shared_mutex> cb_lock(g_callback_mutex);
         if (g_callback_obj) {
             env->DeleteGlobalRef(g_callback_obj);
             g_callback_obj = nullptr;

@@ -12,6 +12,7 @@ import com.tarmac.service.Prefs
 import com.tarmac.service.SessionStateBus
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Decodes UxPlay's mirrored H.264 / H.265 NALU stream onto a [Surface] using
@@ -94,10 +95,12 @@ class VideoPipeline(
     private var statsFrames: Int = 0
     private var statsBytes: Int = 0
 
-    // Cumulative counters for dumpsys / debug-intent diagnostics.
-    @Volatile private var totalSubmits: Long = 0L
-    @Volatile private var totalRenderedFrames: Long = 0L
-    @Volatile private var totalDecoderErrors: Long = 0L
+    // Cumulative counters for dumpsys / debug-intent diagnostics. Atomic because
+    // submit() may be invoked from multiple RAOP worker threads; plain @Volatile
+    // gives visibility but not RMW atomicity, so increments would race.
+    private val totalSubmits = AtomicLong(0L)
+    private val totalRenderedFrames = AtomicLong(0L)
+    private val totalDecoderErrors = AtomicLong(0L)
     private var consecutiveSubmitErrors: Int = 0
 
     /**
@@ -123,9 +126,9 @@ class VideoPipeline(
         width = width,
         height = height,
         hdrActive = hdrEnabled,
-        totalSubmits = totalSubmits,
-        totalRenderedFrames = totalRenderedFrames,
-        totalDecoderErrors = totalDecoderErrors,
+        totalSubmits = totalSubmits.get(),
+        totalRenderedFrames = totalRenderedFrames.get(),
+        totalDecoderErrors = totalDecoderErrors.get(),
     )
 
     fun start(useHevc: Boolean = false) {
@@ -327,16 +330,16 @@ class VideoPipeline(
             var outIdx = c.dequeueOutputBuffer(info, 0)
             while (outIdx >= 0) {
                 c.releaseOutputBuffer(outIdx, /*render*/true)
-                totalRenderedFrames += 1
+                totalRenderedFrames.incrementAndGet()
                 outIdx = c.dequeueOutputBuffer(info, 0)
             }
             statsFrames += 1
             statsBytes += length
-            totalSubmits += 1
+            totalSubmits.incrementAndGet()
             consecutiveSubmitErrors = 0
             maybePublishStats()
         } catch (t: Throwable) {
-            totalDecoderErrors += 1
+            totalDecoderErrors.incrementAndGet()
             consecutiveSubmitErrors += 1
             Log.w(TAG, "submit failed: ${t.message}")
             val fatal = t is MediaCodec.CodecException && !t.isRecoverable ||
