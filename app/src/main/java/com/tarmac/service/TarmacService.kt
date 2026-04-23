@@ -7,7 +7,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
@@ -35,6 +41,13 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
          * awake indefinitely. Reset on every ACTIVE transition.
          */
         private const val WAKE_LOCK_TIMEOUT_MS = 4 * 60 * 60 * 1000L
+
+        /**
+         * Debounce window for network-change storms (e.g. Wi-Fi roam emits
+         * onLost + onAvailable in rapid succession). Coalesce into one
+         * re-advertise so we don't thrash NsdManager.
+         */
+        private const val NET_CHANGE_DEBOUNCE_MS = 750L
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -42,6 +55,24 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
     private var audioPipeline: AudioPipeline? = null
     @Volatile private var currentPin: String = ""
     @Volatile private var sessionState: AirPlayJni.SessionState = AirPlayJni.SessionState.IDLE
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var connMgr: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * Parameters of the last successful Bonjour advertisement, stashed so
+     * [reregisterBonjour] can restart it verbatim after a network change.
+     */
+    private data class BonjourArgs(
+        val deviceName: String,
+        val hwAddr: ByteArray,
+        val port: Int,
+        val displayCaps: DisplayCapabilities,
+    )
+    @Volatile private var lastBonjourArgs: BonjourArgs? = null
+
+    private val reregisterBonjourTask = Runnable { reregisterBonjour() }
 
     /**
      * When the user changes device name from Settings while the service is
@@ -109,14 +140,19 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         }
         val advertisePort = if (port > 0) port else 7000
 
+        val args = BonjourArgs(deviceName, hwAddr, advertisePort, displayCaps)
+        lastBonjourArgs = args
         bonjour = BonjourAdvertiser(this).also {
-            it.start(deviceName, hwAddr, advertisePort, displayCaps = displayCaps)
+            it.start(args.deviceName, args.hwAddr, args.port, displayCaps = args.displayCaps)
         }
+        registerNetworkCallback()
 
         updateNotification(getString(R.string.service_running) + " — PIN $currentPin")
     }
 
     private fun stopAirPlay() {
+        unregisterNetworkCallback()
+        lastBonjourArgs = null
         bonjour?.stop()
         bonjour = null
         AirPlayJni.audioPipeline = null
@@ -162,6 +198,63 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
 
     private fun releaseSessionWakeLock() {
         wakeLock?.runCatching { if (isHeld) release() }
+    }
+
+    /**
+     * Listen for Wi-Fi drops / roams / TV wake-from-standby network events so
+     * the Bonjour advertisement follows the active interface. NsdManager
+     * otherwise keeps the old registration bound to a disappeared netif, and
+     * Mac clients see a stale service record until the OS times it out.
+     *
+     * The native RAOP/HTTP listener is bound to 0.0.0.0 so it already accepts
+     * connections on any interface; only the mDNS advertisement needs restart.
+     */
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) return
+        val cm = (connMgr ?: (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager))
+            .also { connMgr = it }
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { scheduleReregister("onAvailable") }
+            override fun onLost(network: Network) { scheduleReregister("onLost") }
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                scheduleReregister("onCapabilitiesChanged")
+            }
+        }
+        runCatching { cm.registerNetworkCallback(request, cb) }
+            .onSuccess {
+                networkCallback = cb
+                Log.i(TAG, "network callback registered")
+            }
+            .onFailure { Log.w(TAG, "registerNetworkCallback failed: ${it.message}") }
+    }
+
+    private fun unregisterNetworkCallback() {
+        mainHandler.removeCallbacks(reregisterBonjourTask)
+        val cb = networkCallback ?: return
+        runCatching { connMgr?.unregisterNetworkCallback(cb) }
+        networkCallback = null
+    }
+
+    private fun scheduleReregister(source: String) {
+        Log.d(TAG, "network change ($source) — coalescing re-advertise")
+        mainHandler.removeCallbacks(reregisterBonjourTask)
+        mainHandler.postDelayed(reregisterBonjourTask, NET_CHANGE_DEBOUNCE_MS)
+    }
+
+    private fun reregisterBonjour() {
+        val args = lastBonjourArgs ?: return
+        Log.i(TAG, "re-advertising Bonjour after network change")
+        bonjour?.stop()
+        bonjour = BonjourAdvertiser(this).also {
+            runCatching {
+                it.start(args.deviceName, args.hwAddr, args.port, displayCaps = args.displayCaps)
+            }.onFailure { t -> Log.w(TAG, "Bonjour re-advertise failed: ${t.message}") }
+        }
     }
 
     // --- AirPlayJni.Listener ----------------------------------------------
