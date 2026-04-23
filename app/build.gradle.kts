@@ -13,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "1.0.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -38,6 +38,32 @@ android {
         prefab = true
     }
 
+    // Release signing reads from ~/.gradle/gradle.properties (or -P gradle
+    // flags) so the keystore path and passwords never hit the repo. Required
+    // keys when assembling release:
+    //   TARMAC_RELEASE_STORE_FILE     — absolute path to the .jks keystore
+    //   TARMAC_RELEASE_STORE_PASSWORD — keystore password
+    //   TARMAC_RELEASE_KEY_ALIAS      — key alias inside the keystore
+    //   TARMAC_RELEASE_KEY_PASSWORD   — key password
+    // If any are missing, the release signingConfig is left null and
+    // assembleRelease will produce an unsigned APK (still installable only
+    // after manual signing).
+    val tarmacStoreFile = (findProperty("TARMAC_RELEASE_STORE_FILE") as String?)?.let { file(it) }
+    val tarmacStorePassword = findProperty("TARMAC_RELEASE_STORE_PASSWORD") as String?
+    val tarmacKeyAlias = findProperty("TARMAC_RELEASE_KEY_ALIAS") as String?
+    val tarmacKeyPassword = findProperty("TARMAC_RELEASE_KEY_PASSWORD") as String?
+    val tarmacReleaseSigning = if (
+        tarmacStoreFile != null && tarmacStoreFile.exists() &&
+        tarmacStorePassword != null && tarmacKeyAlias != null && tarmacKeyPassword != null
+    ) {
+        signingConfigs.create("release") {
+            storeFile = tarmacStoreFile
+            storePassword = tarmacStorePassword
+            keyAlias = tarmacKeyAlias
+            keyPassword = tarmacKeyPassword
+        }
+    } else null
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -45,6 +71,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            tarmacReleaseSigning?.let { signingConfig = it }
         }
     }
 
