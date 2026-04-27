@@ -10,7 +10,6 @@ class TarmacApplication : Application() {
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             installStrictMode()
         }
-        System.loadLibrary("tarmac-native")
     }
 
     private fun installStrictMode() {

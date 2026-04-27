@@ -59,7 +59,7 @@ object AirPlayJni {
      */
     @Volatile var displayCaps: DisplayCapabilities = DisplayCapabilities.UNKNOWN
 
-    external fun startServer(deviceName: String, hwAddr: ByteArray, features: Long, pin: Int): Int
+    external fun startServer(deviceName: String, hwAddr: ByteArray, features: Long, pin: Int, maxWidth: Int, maxHeight: Int): Int
     external fun stopServer()
     external fun nativeVersion(): String
 

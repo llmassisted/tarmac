@@ -227,7 +227,8 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
 extern "C" JNIEXPORT jint JNICALL
 Java_com_tarmac_service_AirPlayJni_startServer(
         JNIEnv* env, jobject thiz,
-        jstring deviceName, jbyteArray hwAddr, jlong features, jint pin) {
+        jstring deviceName, jbyteArray hwAddr, jlong features, jint pin,
+        jint maxWidth, jint maxHeight) {
     const char* name = env->GetStringUTFChars(deviceName, nullptr);
     jsize hwLen = env->GetArrayLength(hwAddr);
     jbyte* hwBytes = env->GetByteArrayElements(hwAddr, nullptr);
@@ -295,8 +296,8 @@ Java_com_tarmac_service_AirPlayJni_startServer(
         return -2;
     }
     if (pin > 0) raop_set_plist(g_raop, "pin", (int) pin);
-    raop_set_plist(g_raop, "width",  1920);
-    raop_set_plist(g_raop, "height", 1080);
+    raop_set_plist(g_raop, "width",  (int) (maxWidth  > 0 ? maxWidth  : 1920));
+    raop_set_plist(g_raop, "height", (int) (maxHeight > 0 ? maxHeight : 1080));
     raop_set_plist(g_raop, "refreshRate", 60);
     raop_set_plist(g_raop, "maxFPS", 60);
 
@@ -318,6 +319,13 @@ Java_com_tarmac_service_AirPlayJni_startServer(
         return -3;
     }
     raop_set_dnssd(g_raop, g_dnssd);
+
+    // Sync dnssd feature bits with the value the Java side passed so the
+    // native GET /info plist and the Java-side Bonjour TXT never disagree.
+    for (int bit = 0; bit < 64; bit++) {
+        int want = (features >> bit) & 1;
+        dnssd_set_airplay_features(g_dnssd, bit, (int) want);
+    }
 
     unsigned short port = 0;
     raop_start_httpd(g_raop, &port);
@@ -378,8 +386,8 @@ Java_com_tarmac_service_AirPlayJni_stopServer(JNIEnv* env, jobject /*thiz*/) {
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_tarmac_service_AirPlayJni_nativeVersion(JNIEnv* env, jobject /*thiz*/) {
 #ifdef HAVE_LIBAIRPLAY
-    return env->NewStringUTF("tarmac-native 0.2.0 (phase 2, libairplay linked)");
+    return env->NewStringUTF("tarmac-native 1.0.0 (libairplay linked)");
 #else
-    return env->NewStringUTF("tarmac-native 0.2.0 (phase 2, libairplay stubbed)");
+    return env->NewStringUTF("tarmac-native 1.0.0 (libairplay stubbed)");
 #endif
 }

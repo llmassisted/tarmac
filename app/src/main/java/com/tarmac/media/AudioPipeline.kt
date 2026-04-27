@@ -247,7 +247,6 @@ class AudioPipeline(private val appContext: Context? = null) {
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                    .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
                     .build()
             )
             .setAudioFormat(
