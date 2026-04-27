@@ -1,6 +1,9 @@
 package com.tarmac.service
 
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -73,11 +76,15 @@ class SessionStateBusTest {
 
     @Test
     fun `reportPipelineFault emits to pipelineFaults flow`() = runTest {
-        val events = mutableListOf<String>()
+        val collected = mutableListOf<String>()
+        val job = launch {
+            SessionStateBus.pipelineFaults.take(2).toList(collected)
+        }
+        // Yield so the collector subscribes before tryEmit fires.
+        kotlinx.coroutines.yield()
         SessionStateBus.reportPipelineFault("video")
         SessionStateBus.reportPipelineFault("audio")
-        // SharedFlow with extraBufferCapacity=2, so both should be buffered
-        // Use tryEmit semantics — events are available in the buffer
-        assertEquals(true, SessionStateBus.pipelineFaults.replayCache.isEmpty())
+        job.join()
+        assertEquals(listOf("video", "audio"), collected)
     }
 }

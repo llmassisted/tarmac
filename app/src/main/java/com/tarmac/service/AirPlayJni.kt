@@ -54,11 +54,46 @@ object AirPlayJni {
      * Buffered video frame for the surface-creation race window. JNI's
      * ByteBuffer is only valid during the callback, so we copy bytes out.
      */
-    private data class BufferedFrame(
+    private class BufferedFrame(
         val bytes: ByteArray,
         val isH265: Boolean,
         val ntpTimeLocal: Long,
+        val isKeyFrame: Boolean,
     )
+
+    /**
+     * Scan an Annex-B NAL stream for a keyframe-class unit. For H.264 that
+     * means an IDR slice (5) or parameter sets (SPS=7, PPS=8). For H.265 it
+     * means VCL IRAP types (16..21) or VPS/SPS/PPS (32/33/34) and prefix SEI
+     * (39), which Apple senders bundle with the IDR.
+     */
+    private fun containsKeyFrame(bytes: ByteArray, length: Int, isH265: Boolean): Boolean {
+        var i = 0
+        val end = minOf(length, bytes.size)
+        while (i + 3 < end) {
+            val b0 = bytes[i].toInt() and 0xFF
+            val b1 = bytes[i + 1].toInt() and 0xFF
+            val b2 = bytes[i + 2].toInt() and 0xFF
+            val skip = when {
+                b0 == 0 && b1 == 0 && b2 == 1 -> 3
+                b0 == 0 && b1 == 0 && b2 == 0 && (bytes[i + 3].toInt() and 0xFF) == 1 -> 4
+                else -> 0
+            }
+            if (skip == 0) { i++; continue }
+            val hdrIdx = i + skip
+            if (hdrIdx >= end) return false
+            val hdr = bytes[hdrIdx].toInt() and 0xFF
+            if (isH265) {
+                val type = (hdr ushr 1) and 0x3F
+                if (type in 16..21 || type == 32 || type == 33 || type == 34 || type == 39) return true
+            } else {
+                val type = hdr and 0x1F
+                if (type == 5 || type == 7 || type == 8) return true
+            }
+            i += skip
+        }
+        return false
+    }
 
     private val videoBufferLock = Any()
     private val videoBuffer = ArrayDeque<BufferedFrame>(VIDEO_BUFFER_MAX_FRAMES)
@@ -131,19 +166,38 @@ object AirPlayJni {
         }
         // Pipeline not ready yet (MirrorActivity surface still being created).
         // Buffer the frame so we don't lose the initial IDR + SPS/PPS/SEI.
+        // Copy outside the lock — the JNI direct buffer is only valid for this
+        // call and we don't want to hold the buffer mutex during the memcpy.
+        val bytes = ByteArray(length)
+        direct.position(0)
+        direct.get(bytes, 0, length)
+        val isKey = containsKeyFrame(bytes, length, isH265)
         synchronized(videoBufferLock) {
             if (_videoPipeline != null) {
                 // Pipeline attached while we were waiting for the lock — submit directly.
-                _videoPipeline?.submit(direct, length, isH265, ntpTimeLocal)
+                _videoPipeline?.submit(ByteBuffer.wrap(bytes), length, isH265, ntpTimeLocal)
                 return
             }
-            if (videoBuffer.size >= VIDEO_BUFFER_MAX_FRAMES) {
-                videoBuffer.removeFirst()
+            val frame = BufferedFrame(bytes, isH265, ntpTimeLocal, isKey)
+            if (isKey) {
+                // Fresh keyframe — older buffered frames are no longer needed
+                // (and may be stale relative to a stream restart).
+                videoBuffer.clear()
+                videoBuffer.addLast(frame)
+                return@synchronized
             }
-            val bytes = ByteArray(length)
-            direct.position(0)
-            direct.get(bytes, 0, length)
-            videoBuffer.addLast(BufferedFrame(bytes, isH265, ntpTimeLocal))
+            if (videoBuffer.size >= VIDEO_BUFFER_MAX_FRAMES) {
+                // Preserve a leading keyframe so the first delivery to the
+                // pipeline is decodable. Drop the second frame instead.
+                if (videoBuffer.size > 1 && videoBuffer.first().isKeyFrame) {
+                    val head = videoBuffer.removeFirst()
+                    videoBuffer.removeFirst()
+                    videoBuffer.addFirst(head)
+                } else {
+                    videoBuffer.removeFirst()
+                }
+            }
+            videoBuffer.addLast(frame)
         }
     }
 

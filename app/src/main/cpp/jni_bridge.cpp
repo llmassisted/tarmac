@@ -194,6 +194,55 @@ void cb_video_scrub(void* /*cls*/, const float position) {
     scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_scrub, (jfloat) position);
 }
 
+// libairplay's GET /playback-info handler invokes this to pull current
+// position/duration/rate from the Java side. Setting duration = -1 signals
+// "not available" so http_handlers.h returns the empty plist.
+void cb_video_acquire_playback_info(void* /*cls*/, playback_info_t* info) {
+    if (!info) return;
+    info->stallcount = 0;
+    info->seek_start = 0.0;
+    info->seek_duration = 0.0;
+    info->num_loaded_time_ranges = 0;
+    info->num_seekable_time_ranges = 0;
+    info->loadedTimeRanges = nullptr;
+    info->seekableTimeRanges = nullptr;
+    info->ready_to_play = false;
+    info->playback_buffer_empty = false;
+    info->playback_buffer_full = true;
+    info->playback_likely_to_keep_up = true;
+
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_get_playback_info) {
+        info->duration = -1.0;
+        info->position = -1.0;
+        info->rate = 0.0f;
+        return;
+    }
+    jfloatArray arr = (jfloatArray) scope.env->CallObjectMethod(
+        g_callback_obj, g_mid_get_playback_info);
+    if (!arr) {
+        info->duration = -1.0;
+        info->position = -1.0;
+        info->rate = 0.0f;
+        return;
+    }
+    jsize len = scope.env->GetArrayLength(arr);
+    if (len < 3) {
+        scope.env->DeleteLocalRef(arr);
+        info->duration = -1.0;
+        info->position = -1.0;
+        info->rate = 0.0f;
+        return;
+    }
+    jfloat* elems = scope.env->GetFloatArrayElements(arr, nullptr);
+    info->position = (double) elems[0];
+    info->duration = (double) elems[1];
+    info->rate     = elems[2];
+    info->ready_to_play = true;
+    scope.env->ReleaseFloatArrayElements(arr, elems, JNI_ABORT);
+    scope.env->DeleteLocalRef(arr);
+}
+
 void cb_log(void* /*cls*/, int level, const char* msg) {
     if (!msg) return;
     int prio = ANDROID_LOG_INFO;
@@ -267,6 +316,7 @@ Java_com_tarmac_service_AirPlayJni_startServer(
     cbs.on_video_stop  = cb_video_stop;
     cbs.on_video_rate  = cb_video_rate;
     cbs.on_video_scrub = cb_video_scrub;
+    cbs.on_video_acquire_playback_info = cb_video_acquire_playback_info;
 
     g_raop = raop_init(&cbs);
     if (!g_raop) {
@@ -385,40 +435,6 @@ Java_com_tarmac_service_AirPlayJni_stopServer(JNIEnv* env, jobject /*thiz*/) {
         g_mid_get_playback_info = nullptr;
     }
 }
-
-#ifdef HAVE_LIBAIRPLAY
-/**
- * Query current AirPlay Video (HLS) playback position from the Java side.
- * Called by native /playback-info handler. Returns true if info was
- * populated, false if no video is currently playing.
- *
- * @param position_sec  Output: current position in seconds
- * @param duration_sec  Output: total duration in seconds
- * @param rate          Output: playback rate (0 = paused, 1 = normal)
- */
-extern "C" bool tarmac_get_playback_info(float* position_sec, float* duration_sec, float* rate) {
-    CallbackScope scope;
-    if (!scope.ok() || !g_mid_get_playback_info) return false;
-
-    jfloatArray arr = (jfloatArray) scope.env->CallObjectMethod(
-        g_callback_obj, g_mid_get_playback_info);
-    if (!arr) return false;
-
-    jsize len = scope.env->GetArrayLength(arr);
-    if (len < 3) {
-        scope.env->DeleteLocalRef(arr);
-        return false;
-    }
-
-    jfloat* elems = scope.env->GetFloatArrayElements(arr, nullptr);
-    if (position_sec) *position_sec = elems[0];
-    if (duration_sec) *duration_sec = elems[1];
-    if (rate)         *rate         = elems[2];
-    scope.env->ReleaseFloatArrayElements(arr, elems, JNI_ABORT);
-    scope.env->DeleteLocalRef(arr);
-    return true;
-}
-#endif
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_tarmac_service_AirPlayJni_nativeVersion(JNIEnv* env, jobject /*thiz*/) {
