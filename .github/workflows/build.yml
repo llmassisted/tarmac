@@ -30,5 +30,11 @@ jobs:
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --no-daemon
 
+      - name: Lint check
+        run: ./gradlew lintDebug --no-daemon
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon
+
+      - name: Build release APK (verifies R8/ProGuard)
+        run: ./gradlew assembleRelease --no-daemon

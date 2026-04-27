@@ -66,6 +66,7 @@ jmethodID g_mid_on_video_play = nullptr;     // (Ljava/lang/String;F)V
 jmethodID g_mid_on_video_stop = nullptr;     // ()V
 jmethodID g_mid_on_video_rate = nullptr;     // (F)V
 jmethodID g_mid_on_video_scrub = nullptr;    // (F)V
+jmethodID g_mid_get_playback_info = nullptr; // ()[F
 
 #ifdef HAVE_LIBAIRPLAY
 std::mutex g_raop_mutex;
@@ -214,6 +215,7 @@ void resolve_callback_methods(JNIEnv* env, jobject obj) {
     g_mid_on_video_stop    = env->GetMethodID(cls, "onVideoStop",    "()V");
     g_mid_on_video_rate    = env->GetMethodID(cls, "onVideoRate",    "(F)V");
     g_mid_on_video_scrub   = env->GetMethodID(cls, "onVideoScrub",   "(F)V");
+    g_mid_get_playback_info = env->GetMethodID(cls, "getPlaybackInfo", "()[F");
     env->DeleteLocalRef(cls);
 }
 
@@ -380,8 +382,43 @@ Java_com_tarmac_service_AirPlayJni_stopServer(JNIEnv* env, jobject /*thiz*/) {
         g_mid_on_video_stop    = nullptr;
         g_mid_on_video_rate    = nullptr;
         g_mid_on_video_scrub   = nullptr;
+        g_mid_get_playback_info = nullptr;
     }
 }
+
+#ifdef HAVE_LIBAIRPLAY
+/**
+ * Query current AirPlay Video (HLS) playback position from the Java side.
+ * Called by native /playback-info handler. Returns true if info was
+ * populated, false if no video is currently playing.
+ *
+ * @param position_sec  Output: current position in seconds
+ * @param duration_sec  Output: total duration in seconds
+ * @param rate          Output: playback rate (0 = paused, 1 = normal)
+ */
+extern "C" bool tarmac_get_playback_info(float* position_sec, float* duration_sec, float* rate) {
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_get_playback_info) return false;
+
+    jfloatArray arr = (jfloatArray) scope.env->CallObjectMethod(
+        g_callback_obj, g_mid_get_playback_info);
+    if (!arr) return false;
+
+    jsize len = scope.env->GetArrayLength(arr);
+    if (len < 3) {
+        scope.env->DeleteLocalRef(arr);
+        return false;
+    }
+
+    jfloat* elems = scope.env->GetFloatArrayElements(arr, nullptr);
+    if (position_sec) *position_sec = elems[0];
+    if (duration_sec) *duration_sec = elems[1];
+    if (rate)         *rate         = elems[2];
+    scope.env->ReleaseFloatArrayElements(arr, elems, JNI_ABORT);
+    scope.env->DeleteLocalRef(arr);
+    return true;
+}
+#endif
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_tarmac_service_AirPlayJni_nativeVersion(JNIEnv* env, jobject /*thiz*/) {

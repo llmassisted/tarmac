@@ -101,7 +101,7 @@ class VideoPipeline(
     private val totalSubmits = AtomicLong(0L)
     private val totalRenderedFrames = AtomicLong(0L)
     private val totalDecoderErrors = AtomicLong(0L)
-    private var consecutiveSubmitErrors: Int = 0
+    @Volatile private var consecutiveSubmitErrors: Int = 0
 
     /**
      * Invoked once per fatal (non-recoverable) codec failure so the owning
