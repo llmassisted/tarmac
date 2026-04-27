@@ -66,6 +66,7 @@ jmethodID g_mid_on_video_play = nullptr;     // (Ljava/lang/String;F)V
 jmethodID g_mid_on_video_stop = nullptr;     // ()V
 jmethodID g_mid_on_video_rate = nullptr;     // (F)V
 jmethodID g_mid_on_video_scrub = nullptr;    // (F)V
+jmethodID g_mid_get_playback_info = nullptr; // ()[F
 
 #ifdef HAVE_LIBAIRPLAY
 std::mutex g_raop_mutex;
@@ -193,6 +194,55 @@ void cb_video_scrub(void* /*cls*/, const float position) {
     scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_scrub, (jfloat) position);
 }
 
+// libairplay's GET /playback-info handler invokes this to pull current
+// position/duration/rate from the Java side. Setting duration = -1 signals
+// "not available" so http_handlers.h returns the empty plist.
+void cb_video_acquire_playback_info(void* /*cls*/, playback_info_t* info) {
+    if (!info) return;
+    info->stallcount = 0;
+    info->seek_start = 0.0;
+    info->seek_duration = 0.0;
+    info->num_loaded_time_ranges = 0;
+    info->num_seekable_time_ranges = 0;
+    info->loadedTimeRanges = nullptr;
+    info->seekableTimeRanges = nullptr;
+    info->ready_to_play = false;
+    info->playback_buffer_empty = false;
+    info->playback_buffer_full = true;
+    info->playback_likely_to_keep_up = true;
+
+    CallbackScope scope;
+    if (!scope.ok() || !g_mid_get_playback_info) {
+        info->duration = -1.0;
+        info->position = -1.0;
+        info->rate = 0.0f;
+        return;
+    }
+    jfloatArray arr = (jfloatArray) scope.env->CallObjectMethod(
+        g_callback_obj, g_mid_get_playback_info);
+    if (!arr) {
+        info->duration = -1.0;
+        info->position = -1.0;
+        info->rate = 0.0f;
+        return;
+    }
+    jsize len = scope.env->GetArrayLength(arr);
+    if (len < 3) {
+        scope.env->DeleteLocalRef(arr);
+        info->duration = -1.0;
+        info->position = -1.0;
+        info->rate = 0.0f;
+        return;
+    }
+    jfloat* elems = scope.env->GetFloatArrayElements(arr, nullptr);
+    info->position = (double) elems[0];
+    info->duration = (double) elems[1];
+    info->rate     = elems[2];
+    info->ready_to_play = true;
+    scope.env->ReleaseFloatArrayElements(arr, elems, JNI_ABORT);
+    scope.env->DeleteLocalRef(arr);
+}
+
 void cb_log(void* /*cls*/, int level, const char* msg) {
     if (!msg) return;
     int prio = ANDROID_LOG_INFO;
@@ -214,6 +264,7 @@ void resolve_callback_methods(JNIEnv* env, jobject obj) {
     g_mid_on_video_stop    = env->GetMethodID(cls, "onVideoStop",    "()V");
     g_mid_on_video_rate    = env->GetMethodID(cls, "onVideoRate",    "(F)V");
     g_mid_on_video_scrub   = env->GetMethodID(cls, "onVideoScrub",   "(F)V");
+    g_mid_get_playback_info = env->GetMethodID(cls, "getPlaybackInfo", "()[F");
     env->DeleteLocalRef(cls);
 }
 
@@ -227,7 +278,8 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
 extern "C" JNIEXPORT jint JNICALL
 Java_com_tarmac_service_AirPlayJni_startServer(
         JNIEnv* env, jobject thiz,
-        jstring deviceName, jbyteArray hwAddr, jlong features, jint pin) {
+        jstring deviceName, jbyteArray hwAddr, jlong features, jint pin,
+        jint maxWidth, jint maxHeight) {
     const char* name = env->GetStringUTFChars(deviceName, nullptr);
     jsize hwLen = env->GetArrayLength(hwAddr);
     jbyte* hwBytes = env->GetByteArrayElements(hwAddr, nullptr);
@@ -264,6 +316,7 @@ Java_com_tarmac_service_AirPlayJni_startServer(
     cbs.on_video_stop  = cb_video_stop;
     cbs.on_video_rate  = cb_video_rate;
     cbs.on_video_scrub = cb_video_scrub;
+    cbs.on_video_acquire_playback_info = cb_video_acquire_playback_info;
 
     g_raop = raop_init(&cbs);
     if (!g_raop) {
@@ -295,8 +348,8 @@ Java_com_tarmac_service_AirPlayJni_startServer(
         return -2;
     }
     if (pin > 0) raop_set_plist(g_raop, "pin", (int) pin);
-    raop_set_plist(g_raop, "width",  1920);
-    raop_set_plist(g_raop, "height", 1080);
+    raop_set_plist(g_raop, "width",  (int) (maxWidth  > 0 ? maxWidth  : 1920));
+    raop_set_plist(g_raop, "height", (int) (maxHeight > 0 ? maxHeight : 1080));
     raop_set_plist(g_raop, "refreshRate", 60);
     raop_set_plist(g_raop, "maxFPS", 60);
 
@@ -318,6 +371,13 @@ Java_com_tarmac_service_AirPlayJni_startServer(
         return -3;
     }
     raop_set_dnssd(g_raop, g_dnssd);
+
+    // Sync dnssd feature bits with the value the Java side passed so the
+    // native GET /info plist and the Java-side Bonjour TXT never disagree.
+    for (int bit = 0; bit < 64; bit++) {
+        int want = (features >> bit) & 1;
+        dnssd_set_airplay_features(g_dnssd, bit, (int) want);
+    }
 
     unsigned short port = 0;
     raop_start_httpd(g_raop, &port);
@@ -372,14 +432,15 @@ Java_com_tarmac_service_AirPlayJni_stopServer(JNIEnv* env, jobject /*thiz*/) {
         g_mid_on_video_stop    = nullptr;
         g_mid_on_video_rate    = nullptr;
         g_mid_on_video_scrub   = nullptr;
+        g_mid_get_playback_info = nullptr;
     }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_tarmac_service_AirPlayJni_nativeVersion(JNIEnv* env, jobject /*thiz*/) {
 #ifdef HAVE_LIBAIRPLAY
-    return env->NewStringUTF("tarmac-native 0.2.0 (phase 2, libairplay linked)");
+    return env->NewStringUTF("tarmac-native 1.0.0 (libairplay linked)");
 #else
-    return env->NewStringUTF("tarmac-native 0.2.0 (phase 2, libairplay stubbed)");
+    return env->NewStringUTF("tarmac-native 1.0.0 (libairplay stubbed)");
 #endif
 }

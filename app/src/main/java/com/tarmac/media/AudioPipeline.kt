@@ -55,7 +55,7 @@ class AudioPipeline(private val appContext: Context? = null) {
     private val totalFramesIn = AtomicLong(0L)
     private val totalPcmBytesOut = AtomicLong(0L)
     private val totalDecoderErrors = AtomicLong(0L)
-    private var consecutiveDecoderErrors: Int = 0
+    @Volatile private var consecutiveDecoderErrors: Int = 0
 
     /** Invoked on a non-recoverable audio codec failure so the service can restart. */
     @Volatile var onFatalError: ((Throwable) -> Unit)? = null
@@ -247,7 +247,6 @@ class AudioPipeline(private val appContext: Context? = null) {
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                    .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
                     .build()
             )
             .setAudioFormat(

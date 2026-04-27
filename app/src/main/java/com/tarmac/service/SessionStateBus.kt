@@ -81,6 +81,27 @@ object SessionStateBus {
 
     fun emitVideoEvent(event: VideoEvent) { _videoEvents.tryEmit(event) }
 
+    // --- AirPlay Video playback position (for /playback-info responses) ---
+
+    data class PlaybackInfo(
+        val positionSec: Float = 0f,
+        val durationSec: Float = 0f,
+        val rate: Float = 0f,
+    )
+
+    @Volatile private var _playbackInfo = PlaybackInfo()
+
+    /** Current playback position, duration, and rate. Updated by VideoPlayerActivity. */
+    val playbackInfo: PlaybackInfo get() = _playbackInfo
+
+    fun updatePlaybackInfo(positionSec: Float, durationSec: Float, rate: Float) {
+        _playbackInfo = PlaybackInfo(positionSec, durationSec, rate)
+    }
+
+    fun clearPlaybackInfo() {
+        _playbackInfo = PlaybackInfo()
+    }
+
     // --- Fatal pipeline errors — services subscribe to trigger a full restart ---
 
     /**
