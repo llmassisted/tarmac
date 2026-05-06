@@ -13,6 +13,8 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.tarmac.service.SessionStateBus
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class VideoPlayerActivity : FragmentActivity() {
@@ -21,6 +23,7 @@ class VideoPlayerActivity : FragmentActivity() {
         private const val TAG = "VideoPlayerActivity"
         const val EXTRA_URL = "extra_url"
         const val EXTRA_START_SEC = "extra_start_sec"
+        private const val POSITION_UPDATE_INTERVAL_MS = 500L
     }
 
     private var player: ExoPlayer? = null
@@ -37,6 +40,7 @@ class VideoPlayerActivity : FragmentActivity() {
 
         initPlayer(url, startSec)
         observeVideoEvents()
+        startPositionReporter()
     }
 
     private fun initPlayer(url: String, startSec: Float) {
@@ -98,6 +102,26 @@ class VideoPlayerActivity : FragmentActivity() {
         }
     }
 
+    private fun startPositionReporter() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (isActive) {
+                    player?.let { exo ->
+                        val posMs = exo.currentPosition
+                        val durMs = exo.duration.coerceAtLeast(0L)
+                        val rate = if (exo.isPlaying) exo.playbackParameters.speed else 0f
+                        SessionStateBus.updatePlaybackInfo(
+                            positionSec = posMs / 1000f,
+                            durationSec = durMs / 1000f,
+                            rate = rate,
+                        )
+                    }
+                    delay(POSITION_UPDATE_INTERVAL_MS)
+                }
+            }
+        }
+    }
+
     override fun onStart() {
         super.onStart()
         player?.play()
@@ -110,6 +134,7 @@ class VideoPlayerActivity : FragmentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        SessionStateBus.clearPlaybackInfo()
         player?.release()
         player = null
     }

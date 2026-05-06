@@ -3,6 +3,7 @@ package com.tarmac.service
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -171,11 +172,15 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
         val deviceName = resolveDeviceName()
         SessionStateBus.setDeviceName(deviceName)
         val hwAddr = deviceHwAddr()
+        val maxW = if (displayCaps.supports4k) 3840 else 1920
+        val maxH = if (displayCaps.supports4k) 2160 else 1080
         val port = AirPlayJni.startServer(
             deviceName,
             hwAddr,
             FeatureBits.DEFAULT.value,
             currentPin.toInt(),
+            maxW,
+            maxH,
         )
         if (port < 0) {
             Log.e(TAG, "AirPlayJni.startServer returned $port — bailing")
@@ -500,10 +505,17 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
             )
             nm.createNotificationChannel(channel)
         }
+        val tapIntent = Intent(this, com.tarmac.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingTap = PendingIntent.getActivity(
+            this, 0, tapIntent, PendingIntent.FLAG_IMMUTABLE,
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(pendingTap)
             .setOngoing(true)
             .build()
     }
