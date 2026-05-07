@@ -12,8 +12,8 @@ android {
         applicationId = "com.tarmac"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
 
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
@@ -120,4 +120,5 @@ dependencies {
     // this uses the community io.github.ronickg coordinates instead of
     // com.android.ndk.thirdparty (which has no 3.x release).
     implementation(libs.ndk.openssl)
+    implementation(libs.jmdns)
 }
