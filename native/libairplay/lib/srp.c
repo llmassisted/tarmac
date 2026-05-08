@@ -657,17 +657,33 @@ void srp_create_salted_verification_key( SRP_HashAlgorithm alg,
 
     BN_mod_exp(v, ng->g, x, ng->N, ctx);
 
-    *len_s   = BN_num_bytes(s);
-    *len_v   = BN_num_bytes(v);
+    /* BN_num_bytes strips leading zeros, so a verifier whose math happens
+     * to produce a high-zero byte (~1/256) or a salt with high-zero byte
+     * (APPLE_VARIANT 128-bit salt: ~1/128) yields a buffer one or more
+     * bytes shorter than expected. pairing.c::srp_new_user enforces an
+     * exact 16/256 size match and returns err=-3 on mismatch, which
+     * surfaces as "failed to create user" pairing failures on Mac clients.
+     * Pad with leading zeros to the canonical sizes (salt: 16 bytes when
+     * APPLE_VARIANT, else 4; verifier: |N| bytes — 256 for SRP_NG_2048).
+     */
+#ifdef APPLE_VARIANT
+    const int canonical_salt_size = 16;
+#else
+    const int canonical_salt_size = 4;
+#endif
+    const int canonical_verifier_size = BN_num_bytes(ng->N);
 
-    *bytes_s = (const unsigned char *) malloc( *len_s );
-    *bytes_v = (const unsigned char *) malloc( *len_v );
+    *len_s = canonical_salt_size;
+    *len_v = canonical_verifier_size;
 
-    if (!bytes_s || !bytes_v)
+    *bytes_s = (const unsigned char *) malloc( canonical_salt_size );
+    *bytes_v = (const unsigned char *) malloc( canonical_verifier_size );
+
+    if (!*bytes_s || !*bytes_v)
        goto cleanup_and_exit;
 
-    BN_bn2bin(s, (unsigned char *) *bytes_s);
-    BN_bn2bin(v, (unsigned char *) *bytes_v);
+    BN_bn2binpad(s, (unsigned char *) *bytes_s, canonical_salt_size);
+    BN_bn2binpad(v, (unsigned char *) *bytes_v, canonical_verifier_size);
 
  cleanup_and_exit:
     delete_ng( ng );
