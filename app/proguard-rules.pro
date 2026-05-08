@@ -10,6 +10,22 @@
 # Leanback uses reflection for presenter instantiation
 -keep class * extends androidx.leanback.widget.Presenter { *; }
 
+# Fragments are instantiated reflectively by FragmentManager (initial create
+# and after process death / config change). R8 doesn't see the call site and
+# strips the no-arg <init>, causing NoSuchMethodException on activity restore
+# — observed on Hisense H8G after the native AirPlay thread crashed and the
+# OS relaunched MainActivity. Keep the no-arg constructor on every Fragment
+# subclass.
+-keepclassmembers class * extends androidx.fragment.app.Fragment {
+    public <init>();
+}
+-keepclassmembers class * extends androidx.leanback.app.BrowseSupportFragment {
+    public <init>();
+}
+-keepclassmembers class * extends androidx.leanback.preference.LeanbackPreferenceFragmentCompat {
+    public <init>();
+}
+
 # ExoPlayer / Media3 — keep the module service loaders
 -keep class androidx.media3.** { *; }
 -dontwarn androidx.media3.**

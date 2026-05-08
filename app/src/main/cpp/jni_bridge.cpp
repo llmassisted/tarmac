@@ -243,6 +243,24 @@ void cb_video_acquire_playback_info(void* /*cls*/, playback_info_t* info) {
     scope.env->DeleteLocalRef(arr);
 }
 
+// Mirror-thread codec switch. raop_rtp_mirror.c:714 calls this unguarded the
+// first time it sees H264 SPS/PPS (and H265 path at line 635), so leaving it
+// NULL crashes the mirror thread immediately — exactly the SIGSEGV at PC=0
+// we hit on first connect. The Java side detects codec from the SPS bytes
+// inside video_process, so this is purely informational; return success.
+int cb_video_set_codec(void* /*cls*/, video_codec_t /*codec*/) {
+    return 0;
+}
+
+// libairplay invokes these unguarded on the mirror/HLS paths. We don't need
+// to act on them — the Java pipeline reacts to its own MediaCodec signals —
+// but they have to be non-NULL so the calls don't crash. video_reset is
+// the most important: raop_rtp_mirror.c:859 hits it on every session end.
+void cb_video_pause(void* /*cls*/) {}
+void cb_video_resume(void* /*cls*/) {}
+void cb_video_reset(void* /*cls*/, reset_type_t /*reset_type*/) {}
+void cb_conn_feedback(void* /*cls*/) {}
+
 void cb_log(void* /*cls*/, int level, const char* msg) {
     if (!msg) return;
     int prio = ANDROID_LOG_INFO;
@@ -317,6 +335,11 @@ Java_com_tarmac_service_AirPlayJni_startServer(
     cbs.on_video_rate  = cb_video_rate;
     cbs.on_video_scrub = cb_video_scrub;
     cbs.on_video_acquire_playback_info = cb_video_acquire_playback_info;
+    cbs.video_set_codec = cb_video_set_codec;
+    cbs.video_pause     = cb_video_pause;
+    cbs.video_resume    = cb_video_resume;
+    cbs.video_reset     = cb_video_reset;
+    cbs.conn_feedback   = cb_conn_feedback;
 
     g_raop = raop_init(&cbs);
     if (!g_raop) {
