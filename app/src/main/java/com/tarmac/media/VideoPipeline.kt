@@ -318,13 +318,19 @@ class VideoPipeline(
         val c = codec ?: return
         try {
             val inIdx = c.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
-            if (inIdx < 0) return
-            val inBuf = c.getInputBuffer(inIdx) ?: return
-            inBuf.clear()
-            src.position(0)
-            src.limit(length)
-            inBuf.put(src)
-            c.queueInputBuffer(inIdx, 0, length, ptsUs, 0)
+            if (inIdx >= 0) {
+                val inBuf = c.getInputBuffer(inIdx)
+                if (inBuf != null) {
+                    inBuf.clear()
+                    src.position(0)
+                    src.limit(length)
+                    inBuf.put(src)
+                    c.queueInputBuffer(inIdx, 0, length, ptsUs, 0)
+                    statsFrames += 1
+                    statsBytes += length
+                    totalSubmits.incrementAndGet()
+                }
+            }
 
             val info = MediaCodec.BufferInfo()
             var outIdx = c.dequeueOutputBuffer(info, 0)
@@ -333,9 +339,6 @@ class VideoPipeline(
                 totalRenderedFrames.incrementAndGet()
                 outIdx = c.dequeueOutputBuffer(info, 0)
             }
-            statsFrames += 1
-            statsBytes += length
-            totalSubmits.incrementAndGet()
             consecutiveSubmitErrors = 0
             maybePublishStats()
         } catch (t: Throwable) {
