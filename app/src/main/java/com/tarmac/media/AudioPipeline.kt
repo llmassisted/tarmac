@@ -179,13 +179,16 @@ class AudioPipeline(private val appContext: Context? = null) {
         val c = codec ?: return
         try {
             val inIdx = c.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
-            if (inIdx < 0) return
-            val inBuf = c.getInputBuffer(inIdx) ?: return
-            inBuf.clear()
-            direct.position(0)
-            direct.limit(length)
-            inBuf.put(direct)
-            c.queueInputBuffer(inIdx, 0, length, ntpTimeLocal / 1000L, 0)
+            if (inIdx >= 0) {
+                val inBuf = c.getInputBuffer(inIdx)
+                if (inBuf != null) {
+                    inBuf.clear()
+                    direct.position(0)
+                    direct.limit(length)
+                    inBuf.put(direct)
+                    c.queueInputBuffer(inIdx, 0, length, ntpTimeLocal / 1000L, 0)
+                }
+            }
 
             val info = MediaCodec.BufferInfo()
             var outIdx = c.dequeueOutputBuffer(info, 0)
