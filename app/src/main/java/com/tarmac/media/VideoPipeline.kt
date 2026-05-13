@@ -102,8 +102,6 @@ class VideoPipeline(
     private val totalRenderedFrames = AtomicLong(0L)
     private val totalDecoderErrors = AtomicLong(0L)
     @Volatile private var consecutiveSubmitErrors: Int = 0
-    @Volatile private var draining = false
-    private var drainThread: Thread? = null
 
     /**
      * Invoked once per fatal (non-recoverable) codec failure so the owning
@@ -165,7 +163,6 @@ class VideoPipeline(
 
     fun stop() {
         if (!started.compareAndSet(true, false)) return
-        stopDrainThread()
         codec?.runCatching { stop(); release() }
         codec = null
         pending.clear()
@@ -226,7 +223,6 @@ class VideoPipeline(
         val hdrBlob = pendingHdrBlob
 
         codec = tryTunneledConfigure(hdrBlob) ?: configureStandard(hdrBlob)
-        startDrainThread()
 
         Log.i(
             TAG,
@@ -318,42 +314,6 @@ class VideoPipeline(
         }
     }
 
-    private fun startDrainThread() {
-        stopDrainThread()
-        draining = true
-        drainThread = Thread({
-            val info = MediaCodec.BufferInfo()
-            while (draining) {
-                val c = codec
-                if (c == null) {
-                    try { Thread.sleep(5) } catch (_: InterruptedException) { break }
-                    continue
-                }
-                try {
-                    val outIdx = c.dequeueOutputBuffer(info, 10_000)
-                    if (outIdx >= 0) {
-                        c.releaseOutputBuffer(outIdx, true)
-                        totalRenderedFrames.incrementAndGet()
-                    }
-                } catch (t: Throwable) {
-                    if (!draining) break
-                    totalDecoderErrors.incrementAndGet()
-                    Log.w(TAG, "drain: ${t.message}")
-                    if (t is MediaCodec.CodecException && !t.isRecoverable) {
-                        onFatalError?.invoke(t)
-                        break
-                    }
-                }
-            }
-        }, "VideoDrain").also { it.start() }
-    }
-
-    private fun stopDrainThread() {
-        draining = false
-        drainThread?.join(500)
-        drainThread = null
-    }
-
     private fun submitToCodec(src: ByteBuffer, length: Int, ptsUs: Long) {
         val c = codec ?: return
         try {
@@ -371,10 +331,8 @@ class VideoPipeline(
                     totalSubmits.incrementAndGet()
                 }
             }
-            // Supplemental inline drain — some hardware decoders only produce
-            // output when polled from the thread that called configure().
             val info = MediaCodec.BufferInfo()
-            var outIdx = c.dequeueOutputBuffer(info, 0)
+            var outIdx = c.dequeueOutputBuffer(info, 8_000)
             while (outIdx != MediaCodec.INFO_TRY_AGAIN_LATER) {
                 if (outIdx >= 0) {
                     c.releaseOutputBuffer(outIdx, true)
