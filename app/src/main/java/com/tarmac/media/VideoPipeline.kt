@@ -56,7 +56,7 @@ class VideoPipeline(
         private const val FHD_H = 1080
         private const val UHD_W = 3840
         private const val UHD_H = 2160
-        private const val DEQUEUE_TIMEOUT_US = 10_000L
+        private const val DEQUEUE_TIMEOUT_US = 1_000L
         private const val STATS_INTERVAL_MS = 1_000L
 
         // Enough to cover the initial IDR plus any delayed SEI. At 60fps this
@@ -317,17 +317,6 @@ class VideoPipeline(
     private fun submitToCodec(src: ByteBuffer, length: Int, ptsUs: Long) {
         val c = codec ?: return
         try {
-            // Drain output first — frees decoder buffers before we need one for
-            // input. Without this the native mirror thread blocks on a full
-            // pipeline while the Mac's TCP send buffer backs up.
-            val info = MediaCodec.BufferInfo()
-            var outIdx = c.dequeueOutputBuffer(info, 0)
-            while (outIdx >= 0) {
-                c.releaseOutputBuffer(outIdx, /*render*/true)
-                totalRenderedFrames.incrementAndGet()
-                outIdx = c.dequeueOutputBuffer(info, 0)
-            }
-
             val inIdx = c.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
             if (inIdx >= 0) {
                 val inBuf = c.getInputBuffer(inIdx)
@@ -341,6 +330,14 @@ class VideoPipeline(
                     statsBytes += length
                     totalSubmits.incrementAndGet()
                 }
+            }
+
+            val info = MediaCodec.BufferInfo()
+            var outIdx = c.dequeueOutputBuffer(info, 0)
+            while (outIdx >= 0) {
+                c.releaseOutputBuffer(outIdx, /*render*/true)
+                totalRenderedFrames.incrementAndGet()
+                outIdx = c.dequeueOutputBuffer(info, 0)
             }
             consecutiveSubmitErrors = 0
             maybePublishStats()
