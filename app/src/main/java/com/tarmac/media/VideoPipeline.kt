@@ -75,7 +75,7 @@ class VideoPipeline(
 
     private data class Pending(val bytes: ByteArray, val ptsUs: Long)
 
-    private var codec: MediaCodec? = null
+    @Volatile private var codec: MediaCodec? = null
     private val started = AtomicBoolean(false)
     @Volatile private var currentMime: String = MediaFormat.MIMETYPE_VIDEO_AVC
     @Volatile private var width: Int = FHD_W
@@ -324,7 +324,11 @@ class VideoPipeline(
         drainThread = Thread({
             val info = MediaCodec.BufferInfo()
             while (draining) {
-                val c = codec ?: break
+                val c = codec
+                if (c == null) {
+                    try { Thread.sleep(5) } catch (_: InterruptedException) { break }
+                    continue
+                }
                 try {
                     val outIdx = c.dequeueOutputBuffer(info, 10_000)
                     if (outIdx >= 0) {
@@ -366,6 +370,17 @@ class VideoPipeline(
                     statsBytes += length
                     totalSubmits.incrementAndGet()
                 }
+            }
+            // Supplemental inline drain — some hardware decoders only produce
+            // output when polled from the thread that called configure().
+            val info = MediaCodec.BufferInfo()
+            var outIdx = c.dequeueOutputBuffer(info, 0)
+            while (outIdx != MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (outIdx >= 0) {
+                    c.releaseOutputBuffer(outIdx, true)
+                    totalRenderedFrames.incrementAndGet()
+                }
+                outIdx = c.dequeueOutputBuffer(info, 0)
             }
             consecutiveSubmitErrors = 0
             maybePublishStats()

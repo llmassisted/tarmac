@@ -43,7 +43,7 @@ class AudioPipeline(private val appContext: Context? = null) {
         private const val FATAL_ERROR_THRESHOLD = 20
     }
 
-    private var codec: MediaCodec? = null
+    @Volatile private var codec: MediaCodec? = null
     private var track: AudioTrack? = null
     private val started = AtomicBoolean(false)
     @Volatile private var currentCt: Int = -1
@@ -56,8 +56,6 @@ class AudioPipeline(private val appContext: Context? = null) {
     private val totalPcmBytesOut = AtomicLong(0L)
     private val totalDecoderErrors = AtomicLong(0L)
     @Volatile private var consecutiveDecoderErrors: Int = 0
-    @Volatile private var draining = false
-    private var drainThread: Thread? = null
 
     /** Invoked on a non-recoverable audio codec failure so the service can restart. */
     @Volatile var onFatalError: ((Throwable) -> Unit)? = null
@@ -102,7 +100,6 @@ class AudioPipeline(private val appContext: Context? = null) {
 
     fun stop() {
         if (!started.compareAndSet(true, false)) return
-        stopDrainThread()
         codec?.runCatching { stop(); release() }
         codec = null
         track?.runCatching { stop(); release() }
@@ -123,7 +120,6 @@ class AudioPipeline(private val appContext: Context? = null) {
     }
 
     private fun reconfigureCodec(ct: Int) {
-        stopDrainThread()
         codec?.runCatching { stop(); release() }
         codec = null
         currentCt = ct
@@ -167,49 +163,9 @@ class AudioPipeline(private val appContext: Context? = null) {
             c.configure(format, null, null, 0)
             c.start()
             codec = c
-            startDrainThread()
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to configure audio codec for ct=$ct: ${t.message}")
         }
-    }
-
-    private fun startDrainThread() {
-        stopDrainThread()
-        draining = true
-        drainThread = Thread({
-            val info = MediaCodec.BufferInfo()
-            while (draining) {
-                val c = codec ?: break
-                try {
-                    val outIdx = c.dequeueOutputBuffer(info, 10_000)
-                    if (outIdx >= 0) {
-                        val outBuf = c.getOutputBuffer(outIdx)
-                        if (outBuf != null && info.size > 0) {
-                            val pcm = ByteArray(info.size)
-                            outBuf.position(info.offset)
-                            outBuf.get(pcm, 0, info.size)
-                            track?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
-                            totalPcmBytesOut.addAndGet(pcm.size.toLong())
-                        }
-                        c.releaseOutputBuffer(outIdx, false)
-                    }
-                } catch (t: Throwable) {
-                    if (!draining) break
-                    totalDecoderErrors.incrementAndGet()
-                    Log.w(TAG, "audio drain: ${t.message}")
-                    if (t is MediaCodec.CodecException && !t.isRecoverable) {
-                        onFatalError?.invoke(t)
-                        break
-                    }
-                }
-            }
-        }, "AudioDrain").also { it.start() }
-    }
-
-    private fun stopDrainThread() {
-        draining = false
-        drainThread?.join(500)
-        drainThread = null
     }
 
     private fun hasDecoderFor(mime: String): Boolean {
@@ -232,6 +188,22 @@ class AudioPipeline(private val appContext: Context? = null) {
                     inBuf.put(direct)
                     c.queueInputBuffer(inIdx, 0, length, ntpTimeLocal / 1000L, 0)
                 }
+            }
+            val info = MediaCodec.BufferInfo()
+            var outIdx = c.dequeueOutputBuffer(info, 0)
+            while (outIdx != MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (outIdx >= 0) {
+                    val outBuf = c.getOutputBuffer(outIdx)
+                    if (outBuf != null && info.size > 0) {
+                        val pcm = ByteArray(info.size)
+                        outBuf.position(info.offset)
+                        outBuf.get(pcm, 0, info.size)
+                        track?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
+                        totalPcmBytesOut.addAndGet(pcm.size.toLong())
+                    }
+                    c.releaseOutputBuffer(outIdx, false)
+                }
+                outIdx = c.dequeueOutputBuffer(info, 0)
             }
             consecutiveDecoderErrors = 0
         } catch (t: Throwable) {
