@@ -178,18 +178,6 @@ class AudioPipeline(private val appContext: Context? = null) {
     private fun submitEncoded(direct: ByteBuffer, length: Int, ntpTimeLocal: Long) {
         val c = codec ?: return
         try {
-            val inIdx = c.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
-            if (inIdx >= 0) {
-                val inBuf = c.getInputBuffer(inIdx)
-                if (inBuf != null) {
-                    inBuf.clear()
-                    direct.position(0)
-                    direct.limit(length)
-                    inBuf.put(direct)
-                    c.queueInputBuffer(inIdx, 0, length, ntpTimeLocal / 1000L, 0)
-                }
-            }
-
             val info = MediaCodec.BufferInfo()
             var outIdx = c.dequeueOutputBuffer(info, 0)
             while (outIdx >= 0) {
@@ -203,6 +191,18 @@ class AudioPipeline(private val appContext: Context? = null) {
                 }
                 c.releaseOutputBuffer(outIdx, false)
                 outIdx = c.dequeueOutputBuffer(info, 0)
+            }
+
+            val inIdx = c.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
+            if (inIdx >= 0) {
+                val inBuf = c.getInputBuffer(inIdx)
+                if (inBuf != null) {
+                    inBuf.clear()
+                    direct.position(0)
+                    direct.limit(length)
+                    inBuf.put(direct)
+                    c.queueInputBuffer(inIdx, 0, length, ntpTimeLocal / 1000L, 0)
+                }
             }
             consecutiveDecoderErrors = 0
         } catch (t: Throwable) {

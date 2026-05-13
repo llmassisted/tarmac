@@ -317,6 +317,17 @@ class VideoPipeline(
     private fun submitToCodec(src: ByteBuffer, length: Int, ptsUs: Long) {
         val c = codec ?: return
         try {
+            // Drain output first — frees decoder buffers before we need one for
+            // input. Without this the native mirror thread blocks on a full
+            // pipeline while the Mac's TCP send buffer backs up.
+            val info = MediaCodec.BufferInfo()
+            var outIdx = c.dequeueOutputBuffer(info, 0)
+            while (outIdx >= 0) {
+                c.releaseOutputBuffer(outIdx, /*render*/true)
+                totalRenderedFrames.incrementAndGet()
+                outIdx = c.dequeueOutputBuffer(info, 0)
+            }
+
             val inIdx = c.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
             if (inIdx >= 0) {
                 val inBuf = c.getInputBuffer(inIdx)
@@ -330,14 +341,6 @@ class VideoPipeline(
                     statsBytes += length
                     totalSubmits.incrementAndGet()
                 }
-            }
-
-            val info = MediaCodec.BufferInfo()
-            var outIdx = c.dequeueOutputBuffer(info, 0)
-            while (outIdx >= 0) {
-                c.releaseOutputBuffer(outIdx, /*render*/true)
-                totalRenderedFrames.incrementAndGet()
-                outIdx = c.dequeueOutputBuffer(info, 0)
             }
             consecutiveSubmitErrors = 0
             maybePublishStats()
