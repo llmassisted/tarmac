@@ -192,16 +192,18 @@ class AudioPipeline(private val appContext: Context? = null) {
 
             val info = MediaCodec.BufferInfo()
             var outIdx = c.dequeueOutputBuffer(info, 0)
-            while (outIdx >= 0) {
-                val outBuf = c.getOutputBuffer(outIdx)
-                if (outBuf != null && info.size > 0) {
-                    val pcm = ByteArray(info.size)
-                    outBuf.position(info.offset)
-                    outBuf.get(pcm, 0, info.size)
-                    track?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
-                    totalPcmBytesOut.addAndGet(pcm.size.toLong())
+            while (outIdx != MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (outIdx >= 0) {
+                    val outBuf = c.getOutputBuffer(outIdx)
+                    if (outBuf != null && info.size > 0) {
+                        val pcm = ByteArray(info.size)
+                        outBuf.position(info.offset)
+                        outBuf.get(pcm, 0, info.size)
+                        track?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
+                        totalPcmBytesOut.addAndGet(pcm.size.toLong())
+                    }
+                    c.releaseOutputBuffer(outIdx, false)
                 }
-                c.releaseOutputBuffer(outIdx, false)
                 outIdx = c.dequeueOutputBuffer(info, 0)
             }
             consecutiveDecoderErrors = 0

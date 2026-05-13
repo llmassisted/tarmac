@@ -334,9 +334,11 @@ class VideoPipeline(
 
             val info = MediaCodec.BufferInfo()
             var outIdx = c.dequeueOutputBuffer(info, 0)
-            while (outIdx >= 0) {
-                c.releaseOutputBuffer(outIdx, /*render*/true)
-                totalRenderedFrames.incrementAndGet()
+            while (outIdx != MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (outIdx >= 0) {
+                    c.releaseOutputBuffer(outIdx, /*render*/true)
+                    totalRenderedFrames.incrementAndGet()
+                }
                 outIdx = c.dequeueOutputBuffer(info, 0)
             }
             consecutiveSubmitErrors = 0
