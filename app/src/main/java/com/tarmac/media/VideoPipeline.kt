@@ -113,6 +113,7 @@ class VideoPipeline(
     private val freeInputBuffers = ArrayDeque<Int>()
 
     @Volatile private var lastOutputTimeMs: Long = 0L
+    @Volatile private var lastResetTimeMs: Long = 0L
 
     private val codecCallback = object : MediaCodec.Callback() {
         override fun onInputBufferAvailable(mc: MediaCodec, index: Int) {
@@ -207,6 +208,7 @@ class VideoPipeline(
         codecThread?.quitSafely()
         codecThread = null
         lastOutputTimeMs = 0L
+        lastResetTimeMs = 0L
         synchronized(codecLock) { asyncInput.clear(); freeInputBuffers.clear() }
         pending.clear()
     }
@@ -269,7 +271,9 @@ class VideoPipeline(
         val thread = HandlerThread("VideoCodec").also { it.start() }
         codecThread = thread
         val handler = Handler(thread.looper)
-        lastOutputTimeMs = SystemClock.elapsedRealtime()
+        val now = SystemClock.elapsedRealtime()
+        lastOutputTimeMs = now
+        lastResetTimeMs = now
 
         configuredHdrBlob = hdrBlob
         codec = tryTunneledConfigure(hdrBlob, handler) ?: configureStandard(hdrBlob, handler)
@@ -408,9 +412,10 @@ class VideoPipeline(
         if (submitted < 60 || outputTime == 0L) return
         val now = SystemClock.elapsedRealtime()
         if (now - outputTime < 3_000) return
+        if (now - lastResetTimeMs < 10_000) return
 
         Log.w(TAG, "Video stall: $submitted submitted, ${totalRenderedFrames.get()} rendered — recreating codec")
-        lastOutputTimeMs = now
+        lastResetTimeMs = now
         try {
             codec?.runCatching { stop(); release() }
             codec = null

@@ -135,9 +135,9 @@ class AudioPipeline(private val appContext: Context? = null) {
         val format = MediaFormat.createAudioFormat(mime, SAMPLE_RATE, CHANNEL_COUNT).apply {
             if (mime == MediaFormat.MIMETYPE_AUDIO_AAC) {
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfoCompat.AAC_ELD)
-                // AAC-ELD 44100Hz stereo, 480-sample frames (frameLengthFlag=0), no SBR
+                // AAC-ELD 44100Hz stereo
                 setByteBuffer("csd-0", ByteBuffer.wrap(
-                    byteArrayOf(0xF8.toByte(), 0xE8.toByte(), 0x40, 0x00)
+                    byteArrayOf(0xF8.toByte(), 0xE8.toByte(), 0x50, 0x00)
                 ))
             }
         }
