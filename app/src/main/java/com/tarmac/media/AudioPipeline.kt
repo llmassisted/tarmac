@@ -156,6 +156,16 @@ class AudioPipeline(private val appContext: Context? = null) {
                     MediaCodecInfoCompat.AAC_LC
                 }
                 setInteger(MediaFormat.KEY_AAC_PROFILE, profile)
+                // AudioSpecificConfig tells the decoder the exact AAC variant.
+                // Without it, many hardware decoders produce static/garbage.
+                val csd = if (ct == 4) {
+                    // AAC-ELD 44100Hz stereo, 512-sample frames, no SBR
+                    byteArrayOf(0xF8.toByte(), 0xE8.toByte(), 0x50, 0x00)
+                } else {
+                    // AAC-LC 44100Hz stereo
+                    byteArrayOf(0x12, 0x10)
+                }
+                setByteBuffer("csd-0", ByteBuffer.wrap(csd))
             }
         }
         try {

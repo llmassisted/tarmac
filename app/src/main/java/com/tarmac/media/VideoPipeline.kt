@@ -5,6 +5,8 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
@@ -101,7 +103,37 @@ class VideoPipeline(
     private val totalSubmits = AtomicLong(0L)
     private val totalRenderedFrames = AtomicLong(0L)
     private val totalDecoderErrors = AtomicLong(0L)
-    @Volatile private var consecutiveSubmitErrors: Int = 0
+    // Async codec I/O state. submitToCodec (RAOP thread) and codec callbacks
+    // (handler thread) access these under codecLock.
+    private var codecThread: HandlerThread? = null
+    private val codecLock = Object()
+    private val asyncInput = ArrayDeque<Pending>()
+    private val freeInputBuffers = ArrayDeque<Int>()
+
+    private val codecCallback = object : MediaCodec.Callback() {
+        override fun onInputBufferAvailable(mc: MediaCodec, index: Int) {
+            synchronized(codecLock) {
+                val p = asyncInput.removeFirstOrNull()
+                if (p != null) {
+                    fillInputBuffer(mc, index, p)
+                } else {
+                    freeInputBuffers.addLast(index)
+                }
+            }
+        }
+        override fun onOutputBufferAvailable(mc: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+            mc.releaseOutputBuffer(index, true)
+            totalRenderedFrames.incrementAndGet()
+        }
+        override fun onError(mc: MediaCodec, e: MediaCodec.CodecException) {
+            totalDecoderErrors.incrementAndGet()
+            Log.e(TAG, "codec error: ${e.diagnosticInfo}")
+            if (!e.isRecoverable) onFatalError?.invoke(e)
+        }
+        override fun onOutputFormatChanged(mc: MediaCodec, format: MediaFormat) {
+            Log.i(TAG, "output format changed: $format")
+        }
+    }
 
     /**
      * Invoked once per fatal (non-recoverable) codec failure so the owning
@@ -165,6 +197,9 @@ class VideoPipeline(
         if (!started.compareAndSet(true, false)) return
         codec?.runCatching { stop(); release() }
         codec = null
+        codecThread?.quitSafely()
+        codecThread = null
+        synchronized(codecLock) { asyncInput.clear(); freeInputBuffers.clear() }
         pending.clear()
     }
 
@@ -222,7 +257,12 @@ class VideoPipeline(
         height = pendingHeight ?: FHD_H
         val hdrBlob = pendingHdrBlob
 
-        codec = tryTunneledConfigure(hdrBlob) ?: configureStandard(hdrBlob)
+        codecThread?.quitSafely()
+        val thread = HandlerThread("VideoCodec").also { it.start() }
+        codecThread = thread
+        val handler = Handler(thread.looper)
+
+        codec = tryTunneledConfigure(hdrBlob, handler) ?: configureStandard(hdrBlob, handler)
 
         Log.i(
             TAG,
@@ -274,11 +314,9 @@ class VideoPipeline(
      *    codec error), indicating the feature is present in the codec list but
      *    not actually usable in this configuration.
      */
-    private fun tryTunneledConfigure(hdrBlob: ByteArray?): MediaCodec? {
+    private fun tryTunneledConfigure(hdrBlob: ByteArray?, handler: Handler): MediaCodec? {
         if (currentMime != MediaFormat.MIMETYPE_VIDEO_HEVC || audioSessionId <= 0) return null
 
-        // Probe without touching baseFormat — findDecoderForFormat requires the
-        // feature to be set on the queried format.
         val probeFormat = MediaFormat.createVideoFormat(currentMime, width, height).apply {
             setFeatureEnabled(MediaCodecInfo.CodecCapabilities.FEATURE_TunneledPlayback, true)
         }
@@ -293,6 +331,7 @@ class VideoPipeline(
         }
         return try {
             MediaCodec.createDecoderByType(currentMime).also {
+                it.setCallback(codecCallback, handler)
                 it.configure(format, outputSurface, null, 0)
                 it.start()
                 Log.i(TAG, "Tunneled HEVC active (audioSessionId=$audioSessionId)")
@@ -306,53 +345,47 @@ class VideoPipeline(
         }
     }
 
-    private fun configureStandard(hdrBlob: ByteArray?): MediaCodec {
+    private fun configureStandard(hdrBlob: ByteArray?, handler: Handler): MediaCodec {
         val format = buildBaseFormat(hdrBlob)
         return MediaCodec.createDecoderByType(currentMime).also {
+            it.setCallback(codecCallback, handler)
             it.configure(format, outputSurface, null, 0)
             it.start()
         }
     }
 
+    private fun fillInputBuffer(mc: MediaCodec, index: Int, p: Pending) {
+        val buf = mc.getInputBuffer(index) ?: return
+        buf.clear()
+        buf.put(p.bytes, 0, p.bytes.size)
+        mc.queueInputBuffer(index, 0, p.bytes.size, p.ptsUs, 0)
+        statsFrames += 1
+        statsBytes += p.bytes.size
+        totalSubmits.incrementAndGet()
+    }
+
     private fun submitToCodec(src: ByteBuffer, length: Int, ptsUs: Long) {
         val c = codec ?: return
-        try {
-            val inIdx = c.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
-            if (inIdx >= 0) {
-                val inBuf = c.getInputBuffer(inIdx)
-                if (inBuf != null) {
-                    inBuf.clear()
-                    src.position(0)
-                    src.limit(length)
-                    inBuf.put(src)
-                    c.queueInputBuffer(inIdx, 0, length, ptsUs, 0)
-                    statsFrames += 1
-                    statsBytes += length
-                    totalSubmits.incrementAndGet()
+        val bytes = ByteArray(length)
+        src.position(0)
+        src.get(bytes, 0, length)
+        val p = Pending(bytes, ptsUs)
+
+        synchronized(codecLock) {
+            val idx = freeInputBuffers.removeFirstOrNull()
+            if (idx != null) {
+                try {
+                    fillInputBuffer(c, idx, p)
+                } catch (t: Throwable) {
+                    totalDecoderErrors.incrementAndGet()
+                    Log.w(TAG, "submit failed: ${t.message}")
                 }
-            }
-            val info = MediaCodec.BufferInfo()
-            var outIdx = c.dequeueOutputBuffer(info, 8_000)
-            while (outIdx != MediaCodec.INFO_TRY_AGAIN_LATER) {
-                if (outIdx >= 0) {
-                    c.releaseOutputBuffer(outIdx, true)
-                    totalRenderedFrames.incrementAndGet()
-                }
-                outIdx = c.dequeueOutputBuffer(info, 0)
-            }
-            consecutiveSubmitErrors = 0
-            maybePublishStats()
-        } catch (t: Throwable) {
-            totalDecoderErrors.incrementAndGet()
-            consecutiveSubmitErrors += 1
-            Log.w(TAG, "submit failed: ${t.message}")
-            val fatal = t is MediaCodec.CodecException && !t.isRecoverable ||
-                consecutiveSubmitErrors >= FATAL_ERROR_THRESHOLD
-            if (fatal) {
-                Log.e(TAG, "codec in unrecoverable state after $consecutiveSubmitErrors errors")
-                onFatalError?.invoke(t)
+            } else {
+                if (asyncInput.size > 120) asyncInput.removeFirst()
+                asyncInput.addLast(p)
             }
         }
+        maybePublishStats()
     }
 
     private fun maybePublishStats() {
