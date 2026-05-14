@@ -35,6 +35,9 @@ class AudioPipeline(private val appContext: Context? = null) {
 
         /** Consecutive submit errors before we ask the service to restart. */
         private const val FATAL_ERROR_THRESHOLD = 20
+
+        /** Peak amplitude below which a decoded frame is replaced with silence (~-54dB). */
+        private const val NOISE_GATE_THRESHOLD = 64
     }
 
     @Volatile private var codec: MediaCodec? = null
@@ -181,6 +184,7 @@ class AudioPipeline(private val appContext: Context? = null) {
                         val pcm = ByteArray(info.size)
                         outBuf.position(info.offset)
                         outBuf.get(pcm, 0, info.size)
+                        applyNoiseGate(pcm)
                         track?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
                         totalPcmBytesOut.addAndGet(pcm.size.toLong())
                     }
@@ -200,6 +204,23 @@ class AudioPipeline(private val appContext: Context? = null) {
                 onFatalError?.invoke(t)
             }
         }
+    }
+
+    private fun applyNoiseGate(pcm: ByteArray) {
+        // 16-bit little-endian stereo: suppress frames where peak amplitude
+        // is below ~-54dB (threshold 64 out of 32767). Eliminates decoder
+        // artifacts during silence without affecting audible audio.
+        var maxAbs = 0
+        var i = 0
+        while (i + 1 < pcm.size) {
+            val sample = (pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8)
+            val signed = if (sample > 32767) sample - 65536 else sample
+            val abs = if (signed >= 0) signed else -signed
+            if (abs > maxAbs) maxAbs = abs
+            if (maxAbs > NOISE_GATE_THRESHOLD) return
+            i += 2
+        }
+        pcm.fill(0)
     }
 
     private fun audioCodecLabel(ct: Int): String = when (ct) {
