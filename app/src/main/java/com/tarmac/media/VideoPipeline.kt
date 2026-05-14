@@ -91,6 +91,7 @@ class VideoPipeline(
     private var pendingWidth: Int? = null
     private var pendingHeight: Int? = null
     private var pendingHdrBlob: ByteArray? = null
+    @Volatile private var configuredHdrBlob: ByteArray? = null
 
     // Stats — only mutated from the RAOP callback thread inside submit().
     private var statsWindowStartMs: Long = 0L
@@ -270,6 +271,7 @@ class VideoPipeline(
         val handler = Handler(thread.looper)
         lastOutputTimeMs = SystemClock.elapsedRealtime()
 
+        configuredHdrBlob = hdrBlob
         codec = tryTunneledConfigure(hdrBlob, handler) ?: configureStandard(hdrBlob, handler)
 
         Log.i(
@@ -407,18 +409,22 @@ class VideoPipeline(
         val now = SystemClock.elapsedRealtime()
         if (now - outputTime < 3_000) return
 
-        Log.w(TAG, "Video stall: $submitted submitted, ${totalRenderedFrames.get()} rendered — flushing codec")
+        Log.w(TAG, "Video stall: $submitted submitted, ${totalRenderedFrames.get()} rendered — recreating codec")
         lastOutputTimeMs = now
-        val c = codec ?: return
         try {
+            codec?.runCatching { stop(); release() }
+            codec = null
             synchronized(codecLock) {
                 asyncInput.clear()
                 freeInputBuffers.clear()
             }
-            c.flush()
-            c.start()
+            val thread = codecThread ?: return
+            val handler = Handler(thread.looper)
+            codec = tryTunneledConfigure(configuredHdrBlob, handler)
+                ?: configureStandard(configuredHdrBlob, handler)
+            Log.i(TAG, "Codec recreated after stall")
         } catch (t: Throwable) {
-            Log.e(TAG, "Codec reset failed: ${t.message}")
+            Log.e(TAG, "Codec recreation failed: ${t.message}")
         }
     }
 
