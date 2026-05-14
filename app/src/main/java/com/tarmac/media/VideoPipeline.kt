@@ -407,30 +407,28 @@ class VideoPipeline(
     }
 
     private fun maybeResetOnStall() {
-        val submitted = totalSubmits.get()
         val outputTime = lastOutputTimeMs
-        if (submitted < 60 || outputTime == 0L) return
+        if (outputTime == 0L || totalSubmits.get() < 60) return
         val now = SystemClock.elapsedRealtime()
         if (now - outputTime < 3_000) return
         if (now - lastResetTimeMs < 10_000) return
 
-        Log.w(TAG, "Video stall: $submitted submitted, ${totalRenderedFrames.get()} rendered — recreating codec")
+        Log.w(TAG, "Video stall: ${totalSubmits.get()} submitted, " +
+            "${totalRenderedFrames.get()} rendered — resetting to pre-configure")
         lastResetTimeMs = now
-        try {
-            codec?.runCatching { stop(); release() }
-            codec = null
-            synchronized(codecLock) {
-                asyncInput.clear()
-                freeInputBuffers.clear()
-            }
-            val thread = codecThread ?: return
-            val handler = Handler(thread.looper)
-            codec = tryTunneledConfigure(configuredHdrBlob, handler)
-                ?: configureStandard(configuredHdrBlob, handler)
-            Log.i(TAG, "Codec recreated after stall")
-        } catch (t: Throwable) {
-            Log.e(TAG, "Codec recreation failed: ${t.message}")
+        codec?.runCatching { stop(); release() }
+        codec = null
+        codecThread?.quitSafely()
+        codecThread = null
+        synchronized(codecLock) {
+            asyncInput.clear()
+            freeInputBuffers.clear()
         }
+        pending.clear()
+        pendingWidth = null
+        pendingHeight = null
+        pendingHdrBlob = null
+        lastOutputTimeMs = now
     }
 
     private fun maybePublishStats() {
