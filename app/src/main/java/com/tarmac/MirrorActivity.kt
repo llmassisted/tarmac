@@ -11,6 +11,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.tarmac.media.AudioPipeline
 import com.tarmac.media.VideoPipeline
 import com.tarmac.service.AirPlayJni
 import com.tarmac.service.SessionStateBus
@@ -42,9 +43,13 @@ class MirrorActivity : FragmentActivity(), SurfaceHolder.Callback {
                 lastRendered = rendered
                 val stallMs = stalledSince?.let { now - it }
                 val stallLabel = if (stallMs != null) " STALL ${stallMs}ms" else ""
+                val audioLine = AirPlayJni.audioPipeline?.stats()?.let { a ->
+                    "\naudio:${a.codecLabel} in:${a.totalFramesIn} pcm:${a.totalPcmBytesOut} err:${a.totalDecoderErrors}"
+                } ?: "\naudio: none"
                 debugOverlay.text = "${s.mime} ${s.width}x${s.height}" +
-                    "\nin:${s.totalSubmits} out:${rendered} err:${s.totalDecoderErrors}" +
+                    "\nin:${s.totalSubmits} out:${rendered} drop:${s.totalDroppedFrames} err:${s.totalDecoderErrors}" +
                     "\nhdr:${s.hdrActive}$stallLabel" +
+                    audioLine +
                     "\n$lastEvent"
             } else {
                 debugOverlay.text = "pipeline: null\n$lastEvent"

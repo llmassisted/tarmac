@@ -103,12 +103,17 @@ class VideoPipeline(
     private val totalSubmits = AtomicLong(0L)
     private val totalRenderedFrames = AtomicLong(0L)
     private val totalDecoderErrors = AtomicLong(0L)
+    private val totalDroppedFrames = AtomicLong(0L)
     // Async codec I/O state. submitToCodec (RAOP thread) and codec callbacks
     // (handler thread) access these under codecLock.
     private var codecThread: HandlerThread? = null
     private val codecLock = Object()
     private val asyncInput = ArrayDeque<Pending>()
     private val freeInputBuffers = ArrayDeque<Int>()
+
+    // Frame pacing: maps AirPlay PTS (microseconds) to System.nanoTime() domain
+    // so SurfaceFlinger can schedule frames at vsync boundaries.
+    @Volatile private var ptsOffsetNs: Long = Long.MIN_VALUE
 
     private val codecCallback = object : MediaCodec.Callback() {
         override fun onInputBufferAvailable(mc: MediaCodec, index: Int) {
@@ -122,7 +127,17 @@ class VideoPipeline(
             }
         }
         override fun onOutputBufferAvailable(mc: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-            mc.releaseOutputBuffer(index, true)
+            val ptsUs = info.presentationTimeUs
+            if (ptsOffsetNs == Long.MIN_VALUE && ptsUs > 0) {
+                ptsOffsetNs = System.nanoTime() - ptsUs * 1000
+            }
+            if (ptsOffsetNs != Long.MIN_VALUE && ptsUs > 0) {
+                val renderNs = ptsUs * 1000 + ptsOffsetNs
+                // Cap at 100ms in the future to bound latency; past timestamps render immediately.
+                mc.releaseOutputBuffer(index, renderNs.coerceAtMost(System.nanoTime() + 100_000_000L))
+            } else {
+                mc.releaseOutputBuffer(index, true)
+            }
             totalRenderedFrames.incrementAndGet()
         }
         override fun onError(mc: MediaCodec, e: MediaCodec.CodecException) {
@@ -151,6 +166,7 @@ class VideoPipeline(
         val totalSubmits: Long,
         val totalRenderedFrames: Long,
         val totalDecoderErrors: Long,
+        val totalDroppedFrames: Long,
     )
 
     fun stats() = Stats(
@@ -161,6 +177,7 @@ class VideoPipeline(
         totalSubmits = totalSubmits.get(),
         totalRenderedFrames = totalRenderedFrames.get(),
         totalDecoderErrors = totalDecoderErrors.get(),
+        totalDroppedFrames = totalDroppedFrames.get(),
     )
 
     fun start(useHevc: Boolean = false) {
@@ -199,6 +216,7 @@ class VideoPipeline(
         codec = null
         codecThread?.quitSafely()
         codecThread = null
+        ptsOffsetNs = Long.MIN_VALUE
         synchronized(codecLock) { asyncInput.clear(); freeInputBuffers.clear() }
         pending.clear()
     }
@@ -261,6 +279,7 @@ class VideoPipeline(
         val thread = HandlerThread("VideoCodec").also { it.start() }
         codecThread = thread
         val handler = Handler(thread.looper)
+        ptsOffsetNs = Long.MIN_VALUE
 
         codec = tryTunneledConfigure(hdrBlob, handler) ?: configureStandard(hdrBlob, handler)
 
@@ -381,7 +400,10 @@ class VideoPipeline(
                     Log.w(TAG, "submit failed: ${t.message}")
                 }
             } else {
-                if (asyncInput.size > 120) asyncInput.removeFirst()
+                if (asyncInput.size > 8) {
+                    asyncInput.removeFirst()
+                    totalDroppedFrames.incrementAndGet()
+                }
                 asyncInput.addLast(p)
             }
         }
