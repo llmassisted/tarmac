@@ -38,6 +38,9 @@ class AudioPipeline(private val appContext: Context? = null) {
 
         /** Peak amplitude below which a decoded frame is replaced with silence (~-54dB). */
         private const val NOISE_GATE_THRESHOLD = 64
+
+        /** Stereo sample pairs to ramp over when transitioning from silence (~5ms at 44.1kHz). */
+        private const val FADE_IN_PAIRS = 220
     }
 
     @Volatile private var codec: MediaCodec? = null
@@ -45,6 +48,7 @@ class AudioPipeline(private val appContext: Context? = null) {
     private val started = AtomicBoolean(false)
     @Volatile private var currentCt: Int = -1
     @Volatile private var alacUnsupportedLogged = false
+    private var previousFrameGated = false
 
     // Cumulative counters for dumpsys / debug-intent diagnostics. Atomic because
     // submit() is driven from RAOP worker threads; plain @Volatile is not safe
@@ -207,9 +211,18 @@ class AudioPipeline(private val appContext: Context? = null) {
     }
 
     private fun applyNoiseGate(pcm: ByteArray) {
-        // 16-bit little-endian stereo: suppress frames where peak amplitude
-        // is below ~-54dB (threshold 64 out of 32767). Eliminates decoder
-        // artifacts during silence without affecting audible audio.
+        if (peakAmplitude(pcm) <= NOISE_GATE_THRESHOLD) {
+            pcm.fill(0)
+            previousFrameGated = true
+            return
+        }
+        if (previousFrameGated) {
+            applyFadeIn(pcm)
+        }
+        previousFrameGated = false
+    }
+
+    private fun peakAmplitude(pcm: ByteArray): Int {
         var maxAbs = 0
         var i = 0
         while (i + 1 < pcm.size) {
@@ -217,10 +230,26 @@ class AudioPipeline(private val appContext: Context? = null) {
             val signed = if (sample > 32767) sample - 65536 else sample
             val abs = if (signed >= 0) signed else -signed
             if (abs > maxAbs) maxAbs = abs
-            if (maxAbs > NOISE_GATE_THRESHOLD) return
+            if (maxAbs > NOISE_GATE_THRESHOLD) return maxAbs
             i += 2
         }
-        pcm.fill(0)
+        return maxAbs
+    }
+
+    private fun applyFadeIn(pcm: ByteArray) {
+        val totalSamples = FADE_IN_PAIRS * 2
+        var i = 0
+        var n = 0
+        while (i + 1 < pcm.size && n < totalSamples) {
+            val gain = n.toFloat() / totalSamples
+            val sample = (pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8)
+            val signed = if (sample > 32767) sample - 65536 else sample
+            val scaled = (signed * gain).toInt().coerceIn(-32768, 32767)
+            pcm[i] = (scaled and 0xFF).toByte()
+            pcm[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+            i += 2
+            n++
+        }
     }
 
     private fun audioCodecLabel(ct: Int): String = when (ct) {

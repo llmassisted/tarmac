@@ -12,8 +12,8 @@ android {
         applicationId = "com.tarmac"
         minSdk = 26
         targetSdk = 34
-        versionCode = 22
-        versionName = "1.0.21"
+        versionCode = 23
+        versionName = "1.0.22"
 
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
