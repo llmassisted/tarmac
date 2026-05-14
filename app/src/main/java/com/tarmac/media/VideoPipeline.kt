@@ -127,17 +127,7 @@ class VideoPipeline(
             }
         }
         override fun onOutputBufferAvailable(mc: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-            val ptsUs = info.presentationTimeUs
-            if (ptsOffsetNs == Long.MIN_VALUE && ptsUs > 0) {
-                ptsOffsetNs = System.nanoTime() - ptsUs * 1000
-            }
-            if (ptsOffsetNs != Long.MIN_VALUE && ptsUs > 0) {
-                val renderNs = ptsUs * 1000 + ptsOffsetNs
-                // Cap at 100ms in the future to bound latency; past timestamps render immediately.
-                mc.releaseOutputBuffer(index, renderNs.coerceAtMost(System.nanoTime() + 100_000_000L))
-            } else {
-                mc.releaseOutputBuffer(index, true)
-            }
+            mc.releaseOutputBuffer(index, true)
             totalRenderedFrames.incrementAndGet()
         }
         override fun onError(mc: MediaCodec, e: MediaCodec.CodecException) {

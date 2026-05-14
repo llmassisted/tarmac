@@ -16,18 +16,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Decodes UxPlay's RAOP audio frames (AAC-ELD / ALAC / PCM) and pushes PCM to
- * a low-latency [AudioTrack].
+ * Decodes UxPlay's RAOP audio frames (AAC-ELD / ALAC) and pushes PCM to a
+ * low-latency [AudioTrack].
  *
- * UxPlay's `audio_decode_struct.ct` mapping (see lib/raop_handlers.h):
- *   1 = ALAC
- *   2 = AAC-LC
- *   4 = AAC-ELD
- *   8 = PCM (passthrough)
- *
- * Phase 2 baseline: AAC-ELD → MediaCodec → AudioTrack PCM 44.1 kHz stereo.
- * ALAC is handled by switching the MediaCodec MIME type. PCM bypasses the
- * codec entirely.
+ * UxPlay's `audio_decode_struct.ct` mapping (see lib/raop_rtp.c line 121):
+ *   2 = ALAC  (spf=352)
+ *   8 = AAC-ELD  (spf=480)
  */
 class AudioPipeline(private val appContext: Context? = null) {
 
@@ -113,10 +107,7 @@ class AudioPipeline(private val appContext: Context? = null) {
             reconfigureCodec(compressionType)
         }
         totalFramesIn.incrementAndGet()
-        when (compressionType) {
-            8 -> submitPcm(direct, length)
-            else -> submitEncoded(direct, length, ntpTimeLocal)
-        }
+        submitEncoded(direct, length, ntpTimeLocal)
     }
 
     private fun reconfigureCodec(ct: Int) {
@@ -124,21 +115,14 @@ class AudioPipeline(private val appContext: Context? = null) {
         codec = null
         currentCt = ct
         val mime = when (ct) {
-            1 -> ALAC_MIME
-            2, 4 -> MediaFormat.MIMETYPE_AUDIO_AAC
-            8 -> {
-                SessionStateBus.setAudioCodec("PCM")
-                return  // PCM: no codec needed
-            }
+            2 -> ALAC_MIME
+            8 -> MediaFormat.MIMETYPE_AUDIO_AAC
             else -> {
                 Log.w(TAG, "Unknown compression type $ct — skipping codec setup")
                 return
             }
         }
         SessionStateBus.setAudioCodec(audioCodecLabel(ct))
-        // Android has no guaranteed ALAC decoder; a lot of TV devices ship
-        // without one. Detect up-front so we don't crash MediaCodec with
-        // MediaCodec$CodecException on createDecoderByType.
         if (mime == ALAC_MIME && !hasDecoderFor(ALAC_MIME)) {
             if (!alacUnsupportedLogged) {
                 Log.w(TAG, "No ALAC decoder on this device; dropping ALAC frames. " +
@@ -150,22 +134,11 @@ class AudioPipeline(private val appContext: Context? = null) {
         }
         val format = MediaFormat.createAudioFormat(mime, SAMPLE_RATE, CHANNEL_COUNT).apply {
             if (mime == MediaFormat.MIMETYPE_AUDIO_AAC) {
-                val profile = if (ct == 4) {
-                    MediaCodecInfoCompat.AAC_ELD
-                } else {
-                    MediaCodecInfoCompat.AAC_LC
-                }
-                setInteger(MediaFormat.KEY_AAC_PROFILE, profile)
-                // AudioSpecificConfig tells the decoder the exact AAC variant.
-                // Without it, many hardware decoders produce static/garbage.
-                val csd = if (ct == 4) {
-                    // AAC-ELD 44100Hz stereo, 512-sample frames, no SBR
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfoCompat.AAC_ELD)
+                // AAC-ELD 44100Hz stereo, 480-sample frames, no SBR
+                setByteBuffer("csd-0", ByteBuffer.wrap(
                     byteArrayOf(0xF8.toByte(), 0xE8.toByte(), 0x50, 0x00)
-                } else {
-                    // AAC-LC 44100Hz stereo
-                    byteArrayOf(0x12, 0x10)
-                }
-                setByteBuffer("csd-0", ByteBuffer.wrap(csd))
+                ))
             }
         }
         try {
@@ -229,20 +202,9 @@ class AudioPipeline(private val appContext: Context? = null) {
         }
     }
 
-    private fun submitPcm(direct: ByteBuffer, length: Int) {
-        val pcm = ByteArray(length)
-        direct.position(0)
-        direct.limit(length)
-        direct.get(pcm)
-        track?.write(pcm, 0, length, AudioTrack.WRITE_NON_BLOCKING)
-        totalPcmBytesOut.addAndGet(length.toLong())
-    }
-
     private fun audioCodecLabel(ct: Int): String = when (ct) {
-        1 -> "ALAC"
-        2 -> "AAC-LC"
-        4 -> "AAC-ELD"
-        8 -> "PCM"
+        2 -> "ALAC"
+        8 -> "AAC-ELD"
         else -> "ct=$ct"
     }
 
