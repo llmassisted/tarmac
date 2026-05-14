@@ -111,9 +111,7 @@ class VideoPipeline(
     private val asyncInput = ArrayDeque<Pending>()
     private val freeInputBuffers = ArrayDeque<Int>()
 
-    // Frame pacing: maps AirPlay PTS (microseconds) to System.nanoTime() domain
-    // so SurfaceFlinger can schedule frames at vsync boundaries.
-    @Volatile private var ptsOffsetNs: Long = Long.MIN_VALUE
+    @Volatile private var lastOutputTimeMs: Long = 0L
 
     private val codecCallback = object : MediaCodec.Callback() {
         override fun onInputBufferAvailable(mc: MediaCodec, index: Int) {
@@ -129,6 +127,7 @@ class VideoPipeline(
         override fun onOutputBufferAvailable(mc: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
             mc.releaseOutputBuffer(index, true)
             totalRenderedFrames.incrementAndGet()
+            lastOutputTimeMs = SystemClock.elapsedRealtime()
         }
         override fun onError(mc: MediaCodec, e: MediaCodec.CodecException) {
             totalDecoderErrors.incrementAndGet()
@@ -206,7 +205,7 @@ class VideoPipeline(
         codec = null
         codecThread?.quitSafely()
         codecThread = null
-        ptsOffsetNs = Long.MIN_VALUE
+        lastOutputTimeMs = 0L
         synchronized(codecLock) { asyncInput.clear(); freeInputBuffers.clear() }
         pending.clear()
     }
@@ -269,7 +268,7 @@ class VideoPipeline(
         val thread = HandlerThread("VideoCodec").also { it.start() }
         codecThread = thread
         val handler = Handler(thread.looper)
-        ptsOffsetNs = Long.MIN_VALUE
+        lastOutputTimeMs = SystemClock.elapsedRealtime()
 
         codec = tryTunneledConfigure(hdrBlob, handler) ?: configureStandard(hdrBlob, handler)
 
@@ -390,7 +389,7 @@ class VideoPipeline(
                     Log.w(TAG, "submit failed: ${t.message}")
                 }
             } else {
-                if (asyncInput.size > 8) {
+                if (asyncInput.size > 30) {
                     asyncInput.removeFirst()
                     totalDroppedFrames.incrementAndGet()
                 }
@@ -398,6 +397,29 @@ class VideoPipeline(
             }
         }
         maybePublishStats()
+        maybeResetOnStall()
+    }
+
+    private fun maybeResetOnStall() {
+        val submitted = totalSubmits.get()
+        val outputTime = lastOutputTimeMs
+        if (submitted < 60 || outputTime == 0L) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - outputTime < 3_000) return
+
+        Log.w(TAG, "Video stall: $submitted submitted, ${totalRenderedFrames.get()} rendered — flushing codec")
+        lastOutputTimeMs = now
+        val c = codec ?: return
+        try {
+            synchronized(codecLock) {
+                asyncInput.clear()
+                freeInputBuffers.clear()
+            }
+            c.flush()
+            c.start()
+        } catch (t: Throwable) {
+            Log.e(TAG, "Codec reset failed: ${t.message}")
+        }
     }
 
     private fun maybePublishStats() {

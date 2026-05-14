@@ -31,7 +31,7 @@ class AudioPipeline(private val appContext: Context? = null) {
         private const val CHANNEL_COUNT = 2
         private const val DEQUEUE_TIMEOUT_US = 1_000L
         private const val ALAC_MIME = "audio/alac"
-        private const val DEFAULT_BUFFER_KB = 16
+        private const val DEFAULT_BUFFER_KB = 32
 
         /** Consecutive submit errors before we ask the service to restart. */
         private const val FATAL_ERROR_THRESHOLD = 20
@@ -234,7 +234,7 @@ class AudioPipeline(private val appContext: Context? = null) {
             )
             .setBufferSizeInBytes(bufBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
-            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_NONE)
             .build()
     }
 }
