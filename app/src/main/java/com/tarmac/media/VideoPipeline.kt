@@ -73,6 +73,22 @@ class VideoPipeline(
          * a non-recoverable CodecException.
          */
         private const val FATAL_ERROR_THRESHOLD = 10
+
+        /**
+         * Frame-pacing cushion. Decoded frames are scheduled for display at
+         * their stream PTS mapped onto the local clock plus this latency, so
+         * network arrival jitter doesn't translate into on-screen judder. ~50ms
+         * sits below AirPlay mirroring's existing end-to-end latency and is wide
+         * enough to absorb typical jitter.
+         */
+        private const val PACING_TARGET_LATENCY_NS = 50_000_000L
+
+        /**
+         * If a frame's mapped render time lands more than this far in the future,
+         * the PTS timeline jumped (stream restart / CLOCK_REALTIME step) — we
+         * re-anchor and render promptly rather than freeze on a bogus timestamp.
+         */
+        private const val PACING_MAX_AHEAD_NS = 1_000_000_000L
     }
 
     private data class Pending(val bytes: ByteArray, val ptsUs: Long)
@@ -115,6 +131,13 @@ class VideoPipeline(
     @Volatile private var lastOutputTimeMs: Long = 0L
     @Volatile private var lastResetTimeMs: Long = 0L
 
+    // Frame-pacing anchor mapping stream PTS (µs, on UxPlay's local NTP clock)
+    // onto System.nanoTime(). Established on the first rendered frame and reset
+    // to 0 on every (re)configure. @Volatile: written from the RAOP thread
+    // (configure/reset/stop) and read on the codec callback thread.
+    @Volatile private var pacingAnchorNs: Long = 0L
+    @Volatile private var pacingAnchorPtsUs: Long = 0L
+
     private val codecCallback = object : MediaCodec.Callback() {
         override fun onInputBufferAvailable(mc: MediaCodec, index: Int) {
             synchronized(codecLock) {
@@ -127,7 +150,9 @@ class VideoPipeline(
             }
         }
         override fun onOutputBufferAvailable(mc: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-            mc.releaseOutputBuffer(index, true)
+            // Render at the frame's paced wall-clock time instead of "now" so a
+            // burst of decoded frames is spread back out to the stream cadence.
+            mc.releaseOutputBuffer(index, computeRenderTimestamp(info.presentationTimeUs))
             totalRenderedFrames.incrementAndGet()
             lastOutputTimeMs = SystemClock.elapsedRealtime()
         }
@@ -209,6 +234,7 @@ class VideoPipeline(
         codecThread = null
         lastOutputTimeMs = 0L
         lastResetTimeMs = 0L
+        pacingAnchorNs = 0L
         synchronized(codecLock) { asyncInput.clear(); freeInputBuffers.clear() }
         pending.clear()
     }
@@ -240,6 +266,15 @@ class VideoPipeline(
         direct.position(0)
         direct.get(bytes, 0, length)
         direct.position(savedPos)
+
+        // Only start buffering from a keyframe so the codec is always configured
+        // and first fed a decodable IDR. Without this, the first frame after a
+        // stall reset (or a late surface attach) is a mid-GOP P-frame the decoder
+        // can't anchor to — it produces no output, the stall detector fires
+        // again, and the screen stays frozen until the sender's next
+        // spontaneous IDR (the "restart AirPlay to fix it" symptom).
+        if (pending.isEmpty() && !containsKeyFrame(bytes, length, isH265)) return
+
         pending.addLast(Pending(bytes, ptsUs))
 
         if (isH265) {
@@ -274,6 +309,7 @@ class VideoPipeline(
         val now = SystemClock.elapsedRealtime()
         lastOutputTimeMs = now
         lastResetTimeMs = now
+        pacingAnchorNs = 0L
 
         configuredHdrBlob = hdrBlob
         codec = tryTunneledConfigure(hdrBlob, handler) ?: configureStandard(hdrBlob, handler)
@@ -404,6 +440,70 @@ class VideoPipeline(
         }
         maybePublishStats()
         maybeResetOnStall()
+    }
+
+    /**
+     * Map a decoded frame's stream PTS onto the [System.nanoTime] timeline so
+     * MediaCodec renders it at the stream's cadence instead of as fast as it
+     * decodes. The first frame establishes the anchor (PTS↔clock offset plus a
+     * latency cushion); later frames are scheduled relative to it. A render time
+     * far in the future means the PTS timeline jumped, so we re-anchor; a frame
+     * already late is rendered immediately without moving the anchor, so
+     * transient jitter doesn't ratchet latency upward.
+     *
+     * Runs only on the codec callback (handler) thread.
+     */
+    private fun computeRenderTimestamp(ptsUs: Long): Long {
+        val now = System.nanoTime()
+        if (pacingAnchorNs == 0L) {
+            pacingAnchorPtsUs = ptsUs
+            pacingAnchorNs = now + PACING_TARGET_LATENCY_NS
+            return pacingAnchorNs
+        }
+        val renderNs = pacingAnchorNs + (ptsUs - pacingAnchorPtsUs) * 1000L
+        return when {
+            renderNs - now > PACING_MAX_AHEAD_NS -> {
+                pacingAnchorPtsUs = ptsUs
+                pacingAnchorNs = now + PACING_TARGET_LATENCY_NS
+                pacingAnchorNs
+            }
+            renderNs < now -> now
+            else -> renderNs
+        }
+    }
+
+    /**
+     * Scan an Annex-B NAL stream for a keyframe-class unit. H.264: IDR slice (5)
+     * or parameter sets (SPS=7, PPS=8). H.265: VCL IRAP (16..21), VPS/SPS/PPS
+     * (32/33/34), or prefix SEI (39) — the units Apple senders bundle with an
+     * IDR. Mirrors [com.tarmac.service.AirPlayJni]'s pre-surface detector.
+     */
+    private fun containsKeyFrame(bytes: ByteArray, length: Int, isH265: Boolean): Boolean {
+        var i = 0
+        val end = minOf(length, bytes.size)
+        while (i + 3 < end) {
+            val b0 = bytes[i].toInt() and 0xFF
+            val b1 = bytes[i + 1].toInt() and 0xFF
+            val b2 = bytes[i + 2].toInt() and 0xFF
+            val skip = when {
+                b0 == 0 && b1 == 0 && b2 == 1 -> 3
+                b0 == 0 && b1 == 0 && b2 == 0 && (bytes[i + 3].toInt() and 0xFF) == 1 -> 4
+                else -> 0
+            }
+            if (skip == 0) { i++; continue }
+            val hdrIdx = i + skip
+            if (hdrIdx >= end) return false
+            val hdr = bytes[hdrIdx].toInt() and 0xFF
+            if (isH265) {
+                val type = (hdr ushr 1) and 0x3F
+                if (type in 16..21 || type == 32 || type == 33 || type == 34 || type == 39) return true
+            } else {
+                val type = hdr and 0x1F
+                if (type == 5 || type == 7 || type == 8) return true
+            }
+            i += skip
+        }
+        return false
     }
 
     private fun maybeResetOnStall() {

@@ -20,8 +20,13 @@ object AirPlayJni {
 
     private const val TAG = "AirPlayJni"
 
-    /** Max frames to buffer while waiting for MirrorActivity's surface. */
-    private const val VIDEO_BUFFER_MAX_FRAMES = 30
+    /**
+     * Max frames to buffer while waiting for MirrorActivity's surface. Sized to
+     * cover a cold activity launch (~1–2s at 60fps) on a TV. In practice the
+     * backlog rarely approaches this because every fresh keyframe clears it; the
+     * cap only guards memory if the surface never arrives.
+     */
+    private const val VIDEO_BUFFER_MAX_FRAMES = 150
 
     init {
         System.loadLibrary("tarmac-native")
@@ -180,22 +185,22 @@ object AirPlayJni {
             }
             val frame = BufferedFrame(bytes, isH265, ntpTimeLocal, isKey)
             if (isKey) {
-                // Fresh keyframe — older buffered frames are no longer needed
-                // (and may be stale relative to a stream restart).
+                // Fresh keyframe — start a clean GOP; older frames are stale.
                 videoBuffer.clear()
                 videoBuffer.addLast(frame)
                 return@synchronized
             }
+            // Non-keyframe: only buffer it if we already hold a leading keyframe,
+            // so the buffer is always a contiguous GOP the decoder can start on.
+            if (videoBuffer.isEmpty()) return@synchronized
             if (videoBuffer.size >= VIDEO_BUFFER_MAX_FRAMES) {
-                // Preserve a leading keyframe so the first delivery to the
-                // pipeline is decodable. Drop the second frame instead.
-                if (videoBuffer.size > 1 && videoBuffer.first().isKeyFrame) {
-                    val head = videoBuffer.removeFirst()
-                    videoBuffer.removeFirst()
-                    videoBuffer.addFirst(head)
-                } else {
-                    videoBuffer.removeFirst()
-                }
+                // Surface still isn't up after a full buffer of frames — this run
+                // is stale. Drop it whole and wait for the sender's next keyframe
+                // to start clean, rather than punch a hole in the GOP (which
+                // would feed the decoder P-frames referencing dropped frames →
+                // corrupt output until the next IDR).
+                videoBuffer.clear()
+                return@synchronized
             }
             videoBuffer.addLast(frame)
         }

@@ -29,7 +29,14 @@ class AudioPipeline(private val appContext: Context? = null) {
         private const val TAG = "AudioPipeline"
         private const val SAMPLE_RATE = 44_100
         private const val CHANNEL_COUNT = 2
-        private const val DEQUEUE_TIMEOUT_US = 1_000L
+
+        /**
+         * How long to wait for a free decoder input slot. Dropping an encoded
+         * AAC-ELD frame here desyncs the decoder and produces an audible
+         * transient on the next decode, so we'd rather block ~one frame than
+         * lose data. Output is still drained non-blocking (timeout 0).
+         */
+        private const val INPUT_DEQUEUE_TIMEOUT_US = 10_000L
         private const val ALAC_MIME = "audio/alac"
         private const val DEFAULT_BUFFER_KB = 32
 
@@ -39,8 +46,16 @@ class AudioPipeline(private val appContext: Context? = null) {
         /** Peak amplitude below which a decoded frame is replaced with silence (~-54dB). */
         private const val NOISE_GATE_THRESHOLD = 64
 
-        /** Stereo sample pairs to ramp over when transitioning from silence (~5ms at 44.1kHz). */
-        private const val FADE_IN_PAIRS = 220
+        /**
+         * Stereo sample pairs over which to ramp gain when audio resumes after a
+         * gated (silent) stretch. AAC-ELD emits a decoder transient — audible as
+         * a static burst at dialogue onset — across roughly the first frame or
+         * two after silence, so we ramp across ~20ms (≈two ELD frames) to
+         * attenuate it where it's sharpest. The ramp is carried across decode
+         * frame boundaries via [fadeRemainingPairs], so a transient longer than
+         * one frame is still covered.
+         */
+        private const val FADE_IN_PAIRS = 882
     }
 
     @Volatile private var codec: MediaCodec? = null
@@ -49,6 +64,9 @@ class AudioPipeline(private val appContext: Context? = null) {
     @Volatile private var currentCt: Int = -1
     @Volatile private var alacUnsupportedLogged = false
     private var previousFrameGated = false
+    // Stereo pairs still to ramp after a silence→signal transition. Persists
+    // across decode frames so the fade can span a multi-frame decoder transient.
+    private var fadeRemainingPairs = 0
 
     // Cumulative counters for dumpsys / debug-intent diagnostics. Atomic because
     // submit() is driven from RAOP worker threads; plain @Volatile is not safe
@@ -106,6 +124,8 @@ class AudioPipeline(private val appContext: Context? = null) {
         track?.runCatching { stop(); release() }
         track = null
         currentCt = -1
+        previousFrameGated = false
+        fadeRemainingPairs = 0
     }
 
     fun submit(direct: ByteBuffer, length: Int, compressionType: Int, ntpTimeLocal: Long) {
@@ -168,7 +188,7 @@ class AudioPipeline(private val appContext: Context? = null) {
     private fun submitEncoded(direct: ByteBuffer, length: Int, ntpTimeLocal: Long) {
         val c = codec ?: return
         try {
-            val inIdx = c.dequeueInputBuffer(DEQUEUE_TIMEOUT_US)
+            val inIdx = c.dequeueInputBuffer(INPUT_DEQUEUE_TIMEOUT_US)
             if (inIdx >= 0) {
                 val inBuf = c.getInputBuffer(inIdx)
                 if (inBuf != null) {
@@ -189,7 +209,11 @@ class AudioPipeline(private val appContext: Context? = null) {
                         outBuf.position(info.offset)
                         outBuf.get(pcm, 0, info.size)
                         applyNoiseGate(pcm)
-                        track?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
+                        // Blocking write so a momentarily full AudioTrack buffer
+                        // back-pressures decode instead of silently discarding
+                        // PCM (WRITE_NON_BLOCKING returns a short count we'd drop,
+                        // which underruns the track and glitches the audio).
+                        track?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
                         totalPcmBytesOut.addAndGet(pcm.size.toLong())
                     }
                     c.releaseOutputBuffer(outIdx, false)
@@ -217,9 +241,13 @@ class AudioPipeline(private val appContext: Context? = null) {
             return
         }
         if (previousFrameGated) {
-            applyFadeIn(pcm)
+            // Silence → signal: arm a fresh ramp spanning the decoder's
+            // post-silence transient. It may run past this frame, so the
+            // remaining length is tracked and continued on subsequent frames.
+            fadeRemainingPairs = FADE_IN_PAIRS
+            previousFrameGated = false
         }
-        previousFrameGated = false
+        if (fadeRemainingPairs > 0) applyFadeIn(pcm)
     }
 
     private fun peakAmplitude(pcm: ByteArray): Int {
@@ -236,20 +264,28 @@ class AudioPipeline(private val appContext: Context? = null) {
         return maxAbs
     }
 
+    /**
+     * Ramp gain from where the ongoing fade left off up toward unity, one
+     * stereo pair (L+R, 4 bytes) at a time, decrementing [fadeRemainingPairs]
+     * so the ramp continues seamlessly on the next frame if it runs long.
+     */
     private fun applyFadeIn(pcm: ByteArray) {
-        val totalSamples = FADE_IN_PAIRS * 2
         var i = 0
-        var n = 0
-        while (i + 1 < pcm.size && n < totalSamples) {
-            val gain = n.toFloat() / totalSamples
-            val sample = (pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8)
-            val signed = if (sample > 32767) sample - 65536 else sample
-            val scaled = (signed * gain).toInt().coerceIn(-32768, 32767)
-            pcm[i] = (scaled and 0xFF).toByte()
-            pcm[i + 1] = ((scaled shr 8) and 0xFF).toByte()
-            i += 2
-            n++
+        while (i + 3 < pcm.size && fadeRemainingPairs > 0) {
+            val gain = (FADE_IN_PAIRS - fadeRemainingPairs).toFloat() / FADE_IN_PAIRS
+            scaleSampleAt(pcm, i, gain)       // left
+            scaleSampleAt(pcm, i + 2, gain)   // right
+            i += 4
+            fadeRemainingPairs--
         }
+    }
+
+    private fun scaleSampleAt(pcm: ByteArray, idx: Int, gain: Float) {
+        val sample = (pcm[idx].toInt() and 0xFF) or (pcm[idx + 1].toInt() shl 8)
+        val signed = if (sample > 32767) sample - 65536 else sample
+        val scaled = (signed * gain).toInt().coerceIn(-32768, 32767)
+        pcm[idx] = (scaled and 0xFF).toByte()
+        pcm[idx + 1] = ((scaled shr 8) and 0xFF).toByte()
     }
 
     private fun audioCodecLabel(ct: Int): String = when (ct) {
