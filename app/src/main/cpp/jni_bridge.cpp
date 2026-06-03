@@ -126,6 +126,17 @@ struct CallbackScope {
 #ifdef HAVE_LIBAIRPLAY
 // --- UxPlay-style callbacks. Each forwards into the Java AirPlayJni object. -
 
+// A Java exception thrown inside a callback stays pending in the JNIEnv and
+// corrupts (or aborts on) the next JNI call this thread makes. The callbacks
+// here aren't able to handle Java-side failures, so we log and clear any
+// pending exception immediately after every CallVoidMethod/CallObjectMethod.
+inline void clear_pending_exception(JNIEnv* env) {
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();  // dump the stack trace to logcat
+        env->ExceptionClear();
+    }
+}
+
 void cb_video_process(void* /*cls*/, raop_ntp_t* /*ntp*/, video_decode_struct* data) {
     if (!data || !data->data || data->data_len <= 0) return;
     CallbackScope scope;
@@ -134,6 +145,7 @@ void cb_video_process(void* /*cls*/, raop_ntp_t* /*ntp*/, video_decode_struct* d
     scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_data,
                               buf, data->data_len, (jboolean) data->is_h265,
                               (jlong) data->ntp_time_local);
+    clear_pending_exception(scope.env);
     scope.env->DeleteLocalRef(buf);
 }
 
@@ -145,6 +157,7 @@ void cb_audio_process(void* /*cls*/, raop_ntp_t* /*ntp*/, audio_decode_struct* d
     scope.env->CallVoidMethod(g_callback_obj, g_mid_on_audio_data,
                               buf, data->data_len, (jint) data->ct,
                               (jlong) data->ntp_time_local);
+    clear_pending_exception(scope.env);
     scope.env->DeleteLocalRef(buf);
 }
 
@@ -154,6 +167,7 @@ void cb_display_pin(void* /*cls*/, char* pin) {
     if (!scope.ok() || !g_mid_on_pin_display) return;
     jstring s = scope.env->NewStringUTF(pin);
     scope.env->CallVoidMethod(g_callback_obj, g_mid_on_pin_display, s);
+    clear_pending_exception(scope.env);
     scope.env->DeleteLocalRef(s);
 }
 
@@ -161,6 +175,7 @@ void notify_session_state(int state) {
     CallbackScope scope;
     if (!scope.ok() || !g_mid_on_session_state) return;
     scope.env->CallVoidMethod(g_callback_obj, g_mid_on_session_state, (jint) state);
+    clear_pending_exception(scope.env);
 }
 
 void cb_conn_init(void* /*cls*/)    { notify_session_state(1); }
@@ -173,6 +188,7 @@ void cb_video_play(void* /*cls*/, const char* location, const float start_positi
     if (!scope.ok() || !g_mid_on_video_play) return;
     jstring s = scope.env->NewStringUTF(location);
     scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_play, s, (jfloat) start_position);
+    clear_pending_exception(scope.env);
     scope.env->DeleteLocalRef(s);
 }
 
@@ -180,18 +196,21 @@ void cb_video_stop(void* /*cls*/) {
     CallbackScope scope;
     if (!scope.ok() || !g_mid_on_video_stop) return;
     scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_stop);
+    clear_pending_exception(scope.env);
 }
 
 void cb_video_rate(void* /*cls*/, const float rate) {
     CallbackScope scope;
     if (!scope.ok() || !g_mid_on_video_rate) return;
     scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_rate, (jfloat) rate);
+    clear_pending_exception(scope.env);
 }
 
 void cb_video_scrub(void* /*cls*/, const float position) {
     CallbackScope scope;
     if (!scope.ok() || !g_mid_on_video_scrub) return;
     scope.env->CallVoidMethod(g_callback_obj, g_mid_on_video_scrub, (jfloat) position);
+    clear_pending_exception(scope.env);
 }
 
 // libairplay's GET /playback-info handler invokes this to pull current
@@ -220,6 +239,7 @@ void cb_video_acquire_playback_info(void* /*cls*/, playback_info_t* info) {
     }
     jfloatArray arr = (jfloatArray) scope.env->CallObjectMethod(
         g_callback_obj, g_mid_get_playback_info);
+    clear_pending_exception(scope.env);
     if (!arr) {
         info->duration = -1.0;
         info->position = -1.0;
