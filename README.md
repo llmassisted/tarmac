@@ -84,6 +84,59 @@ adb shell am broadcast -p com.tarmac -a com.tarmac.action.DUMP_STATS
 
 StrictMode thread + VM policies are installed on debuggable builds so disk/network on main, leaked closables, and activity leaks show up in logcat.
 
+## Known issues
+
+From a code review (2026-06-02) targeting the three reported symptoms — first
+connection failing, mid-session stall requiring an AirPlay restart, and choppy
+A/V. Findings were verified against source; severities below are post-verification.
+
+**Resolved** on branch `fix/review-tier-b-cluster`: reconnect-flap mirror teardown,
+audio-codec retry after a failed create, main-thread ANR on restart, session-state
+binder IPC under the JNI lock, and JNI exception safety.
+
+### Outstanding — VideoPipeline codec lifecycle (`app/src/main/java/com/tarmac/media/VideoPipeline.kt`)
+
+These are concurrency races between the async MediaCodec callback thread and the
+teardown/reset paths. Best fixed together as one atomic-lifecycle change.
+
+- **HIGH** — `maybeResetOnStall()` (~`:519`) releases the codec before
+  `quitSafely()`/join; the callback thread can call `releaseOutputBuffer` on a
+  freed codec (use-after-free / `IllegalStateException` mid-recovery).
+- **HIGH** — `stop()` (~`:231`) has the same unsynchronized release-vs-callback
+  race on the teardown path (`MirrorActivity.surfaceDestroyed`).
+- **HIGH** — pre-configure surface-attach window mutates the non-synchronized
+  `pending` deque and non-volatile `pendingWidth/Height/HdrBlob` from both the
+  main drain loop and the native mirror thread → corrupted initial GOP.
+- **HIGH** — `quitSafely()` is never `join()`ed in the reset/configure paths, so
+  callbacks can run on a dying looper or a just-released codec.
+- **MEDIUM** — `asyncInput` overflow (`:433`) drops the *oldest* NALU, punching a
+  hole in the GOP reference chain → macroblock corruption until the next IDR.
+- **LOW** — `onError` (`:159`) ignores recoverable `CodecException`s; the codec
+  stays dead until the stall detector fires (multi-second freeze).
+- **LOW** — `freeInputBuffers` indices aren't generation-bound across resets;
+  a stale index can hit the new codec.
+
+### Outstanding — other
+
+- **MEDIUM** — `AudioPipeline.submitEncoded()` / `stop()` share no lock; a RAOP
+  worker can use the codec/AudioTrack as `stop()` releases it. Contained today by
+  the surrounding `try/catch` (surfaces as caught `IllegalStateException`), but a
+  shared `audioCodecLock` is the clean fix.
+- **MEDIUM (bounded)** — NTP/PTS timing uses `CLOCK_REALTIME`
+  (`native/libairplay/lib/raop_ntp.c:504`); a system clock step causes a one-time
+  judder burst, not a permanent freeze (the pacing anchor re-anchors). Wants a
+  monotonic clock for the local pacing timeline.
+- **LOW** — session wake lock isn't released in `stopAirPlay()`; after a
+  fault-restart it can stay held (bounded by a 4h timeout, self-heals on next IDLE).
+- **LOW** — `VideoPipeline` `KEY_MAX_WIDTH/HEIGHT` is set to the display ceiling;
+  a sender that ignores the advertised resolution and streams larger would hit a
+  contradictory `configure()`. Hardening: `maxOf(width, ceiling)`.
+
+### By design (not bugs)
+
+- `AudioPipeline` uses `WRITE_BLOCKING` deliberately (back-pressures decode rather
+  than dropping PCM). Only revisit as part of a receive/playback decoupling refactor.
+
 ## License
 
 **GPL-3.0-only.** UxPlay is GPL-3.0, so any build that includes the subtree must also be distributed under GPL-3.0. The UI/service layers (Kotlin code in `app/`) are GPL-3.0 for consistency.
