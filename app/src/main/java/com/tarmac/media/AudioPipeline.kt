@@ -175,6 +175,11 @@ class AudioPipeline(private val appContext: Context? = null) {
             codec = c
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to configure audio codec for ct=$ct: ${t.message}")
+            // Leave currentCt unset so the next frame of this compression type
+            // retries configuration instead of matching currentCt and silently
+            // dropping audio forever (codec stays null). The intentional skips
+            // above (unknown ct / no ALAC decoder) deliberately keep currentCt.
+            currentCt = -1
         }
     }
 
