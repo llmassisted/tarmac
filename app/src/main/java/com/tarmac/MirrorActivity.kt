@@ -28,6 +28,11 @@ class MirrorActivity : FragmentActivity(), SurfaceHolder.Callback {
     private var stalledSince: Long? = null
     @Volatile private var lastEvent = "init"
 
+    // Posted on session IDLE to close the mirror after a grace period; cancelled
+    // if the session goes ACTIVE again before it fires, so a reconnect within the
+    // window isn't torn down by a stale IDLE timer.
+    private val finishRunnable = Runnable { if (!isFinishing) finish() }
+
     private val debugTick = object : Runnable {
         override fun run() {
             val p = pipeline
@@ -71,10 +76,17 @@ class MirrorActivity : FragmentActivity(), SurfaceHolder.Callback {
                 SessionStateBus.state
                     .distinctUntilChangedBy { it.connection }
                     .collect { snap ->
-                        if (snap.connection == SessionStateBus.Connection.IDLE && !isFinishing) {
-                            lastEvent = "session->IDLE (finishing)"
-                            debugTick.run()
-                            handler.postDelayed({ if (!isFinishing) finish() }, 3000)
+                        if (snap.connection == SessionStateBus.Connection.IDLE) {
+                            if (!isFinishing) {
+                                lastEvent = "session->IDLE (finishing)"
+                                debugTick.run()
+                                handler.removeCallbacks(finishRunnable)
+                                handler.postDelayed(finishRunnable, 3000)
+                            }
+                        } else {
+                            // Reconnected before the delayed finish fired — cancel it
+                            // so we don't tear down a freshly re-established session.
+                            handler.removeCallbacks(finishRunnable)
                         }
                     }
             }
