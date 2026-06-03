@@ -216,8 +216,18 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
     }
 
     private fun restartAirPlay() {
-        stopAirPlay()
-        startAirPlay()
+        // stopAirPlay() → AirPlayJni.stopServer() → native raop_destroy joins the
+        // RAOP worker threads synchronously. Both callers (prefListener and the
+        // pipelineFaults collector) run on the main thread, so doing this inline
+        // risks an ANR on the self-heal path. Hop to a background thread; the
+        // synchronized block (same monitor as the @Synchronized start/stop) keeps
+        // the stop+start pair atomic against concurrent restarts and teardown.
+        lifecycleScope.launch(Dispatchers.IO) {
+            synchronized(this@TarmacService) {
+                stopAirPlay()
+                startAirPlay()
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -412,28 +422,38 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
             AirPlayJni.SessionState.ACTIVE -> SessionStateBus.Connection.ACTIVE
             AirPlayJni.SessionState.IDLE -> SessionStateBus.Connection.IDLE
         }
+        // setConnection / clearMediaStats are cheap StateFlow writes — safe and
+        // desirable to run inline so UI state updates immediately.
         SessionStateBus.setConnection(busState)
-        when (state) {
-            AirPlayJni.SessionState.ACTIVE -> {
-                acquireSessionWakeLock()
-                sessionActiveStartElapsedMs = SystemClock.elapsedRealtime()
-                totalSessionActivations += 1
-            }
-            AirPlayJni.SessionState.IDLE -> {
-                releaseSessionWakeLock()
-                sessionActiveStartElapsedMs = 0L
-            }
-        }
         if (state == AirPlayJni.SessionState.IDLE) SessionStateBus.clearMediaStats()
-        updateNotification(
+
+        // This callback runs on the native RAOP worker thread while jni_bridge
+        // holds g_callback_mutex (shared); the bridge contract requires callbacks
+        // to return fast or they stall stopServer's exclusive lock. PowerManager,
+        // NotificationManager and startActivity are blocking binder IPC, so defer
+        // them to the main thread and let this callback return immediately.
+        mainHandler.post {
             when (state) {
-                AirPlayJni.SessionState.ACTIVE -> "Streaming from client"
-                AirPlayJni.SessionState.IDLE -> getString(R.string.service_running) + " — PIN $currentPin"
+                AirPlayJni.SessionState.ACTIVE -> {
+                    acquireSessionWakeLock()
+                    sessionActiveStartElapsedMs = SystemClock.elapsedRealtime()
+                    totalSessionActivations += 1
+                }
+                AirPlayJni.SessionState.IDLE -> {
+                    releaseSessionWakeLock()
+                    sessionActiveStartElapsedMs = 0L
+                }
             }
-        )
-        when (state) {
-            AirPlayJni.SessionState.ACTIVE -> launchMirrorActivity()
-            AirPlayJni.SessionState.IDLE -> Unit
+            updateNotification(
+                when (state) {
+                    AirPlayJni.SessionState.ACTIVE -> "Streaming from client"
+                    AirPlayJni.SessionState.IDLE -> getString(R.string.service_running) + " — PIN $currentPin"
+                }
+            )
+            when (state) {
+                AirPlayJni.SessionState.ACTIVE -> launchMirrorActivity()
+                AirPlayJni.SessionState.IDLE -> Unit
+            }
         }
     }
 
