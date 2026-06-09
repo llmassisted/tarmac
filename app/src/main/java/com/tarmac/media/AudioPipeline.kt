@@ -61,6 +61,14 @@ class AudioPipeline(private val appContext: Context? = null) {
     @Volatile private var codec: MediaCodec? = null
     private var track: AudioTrack? = null
     private val started = AtomicBoolean(false)
+
+    // Guards codec/track lifecycle against the RAOP submit path. Without it,
+    // stop() could release the codec while a worker that had already passed
+    // the started check was inside submitEncoded() — caught, but each
+    // occurrence counted toward FATAL_ERROR_THRESHOLD and could force a
+    // spurious session restart during teardown. The started flag is
+    // re-checked inside the lock to close that TOCTOU.
+    private val codecLock = Object()
     @Volatile private var currentCt: Int = -1
     @Volatile private var alacUnsupportedLogged = false
     private var previousFrameGated = false
@@ -113,19 +121,23 @@ class AudioPipeline(private val appContext: Context? = null) {
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
-        track = buildAudioTrack().also { it.play() }
+        synchronized(codecLock) {
+            track = buildAudioTrack().also { it.play() }
+        }
         Log.i(TAG, "AudioPipeline started")
     }
 
     fun stop() {
         if (!started.compareAndSet(true, false)) return
-        codec?.runCatching { stop(); release() }
-        codec = null
-        track?.runCatching { stop(); release() }
-        track = null
-        currentCt = -1
-        previousFrameGated = false
-        fadeRemainingPairs = 0
+        synchronized(codecLock) {
+            codec?.runCatching { stop(); release() }
+            codec = null
+            track?.runCatching { stop(); release() }
+            track = null
+            currentCt = -1
+            previousFrameGated = false
+            fadeRemainingPairs = 0
+        }
     }
 
     fun submit(direct: ByteBuffer, length: Int, compressionType: Int, ntpTimeLocal: Long) {
@@ -137,7 +149,10 @@ class AudioPipeline(private val appContext: Context? = null) {
         submitEncoded(direct, length, ntpTimeLocal)
     }
 
-    private fun reconfigureCodec(ct: Int) {
+    private fun reconfigureCodec(ct: Int): Unit = synchronized(codecLock) {
+        // Re-check under the lock: a concurrent stop() must not be followed
+        // by a fresh codec we'd then leak.
+        if (!started.get()) return
         codec?.runCatching { stop(); release() }
         codec = null
         currentCt = ct
@@ -190,7 +205,8 @@ class AudioPipeline(private val appContext: Context? = null) {
         }
     }
 
-    private fun submitEncoded(direct: ByteBuffer, length: Int, ntpTimeLocal: Long) {
+    private fun submitEncoded(direct: ByteBuffer, length: Int, ntpTimeLocal: Long): Unit = synchronized(codecLock) {
+        if (!started.get()) return
         val c = codec ?: return
         try {
             val inIdx = c.dequeueInputBuffer(INPUT_DEQUEUE_TIMEOUT_US)
