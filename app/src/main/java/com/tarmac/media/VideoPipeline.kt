@@ -102,7 +102,9 @@ class VideoPipeline(
     @Volatile private var displaySupportsHdr10: Boolean = false
     @Volatile private var displaySupports4k: Boolean = false
 
-    // Pre-configure buffering state (RAOP callback thread only).
+    // Pre-configure buffering state. submit() may be invoked from multiple
+    // RAOP worker threads and races the stop()/reset paths, so all access is
+    // guarded by codecLock.
     private val pending = ArrayDeque<Pending>()
     private var pendingWidth: Int? = null
     private var pendingHeight: Int? = null
@@ -128,6 +130,15 @@ class VideoPipeline(
     private val asyncInput = ArrayDeque<Pending>()
     private val freeInputBuffers = ArrayDeque<Int>()
 
+    // Codec lifecycle generation, guarded by codecLock. Bumped on every
+    // teardown and configure so callbacks created for an earlier codec
+    // instance detect they are stale and bail instead of touching a codec
+    // that is being (or has been) released. Buffer indices in
+    // freeInputBuffers are implicitly generation-bound: both queues are
+    // cleared under the lock at every bump, and stale callbacks can no
+    // longer enqueue indices afterward.
+    private var codecGeneration = 0
+
     @Volatile private var lastOutputTimeMs: Long = 0L
     @Volatile private var lastResetTimeMs: Long = 0L
 
@@ -138,12 +149,26 @@ class VideoPipeline(
     @Volatile private var pacingAnchorNs: Long = 0L
     @Volatile private var pacingAnchorPtsUs: Long = 0L
 
-    private val codecCallback = object : MediaCodec.Callback() {
+    /**
+     * Callbacks are minted per codec instance with that instance's generation
+     * baked in. A callback whose generation no longer matches
+     * [codecGeneration] is racing a teardown/reset: it must neither feed the
+     * dying codec nor donate its buffer index to the next one. Every codec
+     * touch is also exception-guarded — an uncaught throw here lands on the
+     * codec HandlerThread with no handler and kills the process.
+     */
+    private fun newCodecCallback(generation: Int) = object : MediaCodec.Callback() {
         override fun onInputBufferAvailable(mc: MediaCodec, index: Int) {
             synchronized(codecLock) {
+                if (generation != codecGeneration) return
                 val p = asyncInput.removeFirstOrNull()
                 if (p != null) {
-                    fillInputBuffer(mc, index, p)
+                    try {
+                        fillInputBuffer(mc, index, p)
+                    } catch (t: Throwable) {
+                        totalDecoderErrors.incrementAndGet()
+                        Log.w(TAG, "async input fill failed: ${t.message}")
+                    }
                 } else {
                     freeInputBuffers.addLast(index)
                 }
@@ -152,9 +177,14 @@ class VideoPipeline(
         override fun onOutputBufferAvailable(mc: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
             // Render at the frame's paced wall-clock time instead of "now" so a
             // burst of decoded frames is spread back out to the stream cadence.
-            mc.releaseOutputBuffer(index, computeRenderTimestamp(info.presentationTimeUs))
-            totalRenderedFrames.incrementAndGet()
-            lastOutputTimeMs = SystemClock.elapsedRealtime()
+            try {
+                mc.releaseOutputBuffer(index, computeRenderTimestamp(info.presentationTimeUs))
+                totalRenderedFrames.incrementAndGet()
+                lastOutputTimeMs = SystemClock.elapsedRealtime()
+            } catch (t: Throwable) {
+                totalDecoderErrors.incrementAndGet()
+                Log.w(TAG, "releaseOutputBuffer failed: ${t.message}")
+            }
         }
         override fun onError(mc: MediaCodec, e: MediaCodec.CodecException) {
             totalDecoderErrors.incrementAndGet()
@@ -212,10 +242,7 @@ class VideoPipeline(
         width = FHD_W
         height = FHD_H
 
-        pending.clear()
-        pendingWidth = null
-        pendingHeight = null
-        pendingHdrBlob = null
+        synchronized(codecLock) { clearPendingLocked() }
 
         Log.i(
             TAG,
@@ -228,15 +255,55 @@ class VideoPipeline(
 
     fun stop() {
         if (!started.compareAndSet(true, false)) return
-        codec?.runCatching { stop(); release() }
-        codec = null
-        codecThread?.quitSafely()
-        codecThread = null
+        releaseCodecAndThread()
+        synchronized(codecLock) { clearPendingLocked() }
         lastOutputTimeMs = 0L
         lastResetTimeMs = 0L
         pacingAnchorNs = 0L
-        synchronized(codecLock) { asyncInput.clear(); freeInputBuffers.clear() }
+    }
+
+    /**
+     * Tears down the current codec and its callback thread atomically.
+     *
+     * Under [codecLock] the generation is advanced (so in-flight callbacks of
+     * the old generation bail instead of touching the dying codec), the
+     * codec/thread fields are detached, and the queued input state is
+     * cleared. The codec is stopped and released only *after* the callback
+     * thread has been quit and joined — releasing earlier races async
+     * callbacks against the released codec, which used to surface as an
+     * uncaught IllegalStateException on the callback thread mid-teardown or
+     * mid-stall-recovery.
+     */
+    private fun releaseCodecAndThread() {
+        val oldCodec: MediaCodec?
+        val oldThread: HandlerThread?
+        synchronized(codecLock) {
+            codecGeneration++
+            oldCodec = codec
+            codec = null
+            oldThread = codecThread
+            codecThread = null
+            asyncInput.clear()
+            freeInputBuffers.clear()
+        }
+        oldThread?.let {
+            it.quitSafely()
+            // join() outside codecLock: drained callbacks briefly take the
+            // lock, so joining while holding it would deadlock. Never
+            // self-join (defensive: teardown is not expected on this thread).
+            if (Thread.currentThread() !== it) {
+                runCatching { it.join(1_000) }
+            }
+        }
+        oldCodec?.runCatching { stop(); release() }
+    }
+
+    /** Guarded by codecLock. */
+    private fun clearPendingLocked() {
         pending.clear()
+        pendingWidth = null
+        pendingHeight = null
+        pendingHdrBlob = null
     }
 
     fun submit(direct: ByteBuffer, length: Int, isH265: Boolean, ntpTimeLocal: Long) {
@@ -248,19 +315,28 @@ class VideoPipeline(
         }
         val ptsUs = ntpTimeLocal / 1000L
 
-        if (codec == null) {
-            bufferForConfig(direct, length, ptsUs, isH265)
-            return
+        // The buffer-vs-submit decision must be made under codecLock: during
+        // the surface-attach window multiple threads reach here, and an
+        // unlocked check would let two of them race bufferForConfig's
+        // mutation of `pending` (or buffer a frame that configureAndFlush
+        // already flushed past).
+        val configured = synchronized(codecLock) {
+            if (codec == null) {
+                bufferForConfigLocked(direct, length, ptsUs, isH265)
+                false
+            } else {
+                true
+            }
         }
-        submitToCodec(direct, length, ptsUs)
+        if (configured) submitToCodec(direct, length, ptsUs)
     }
 
     /**
      * Capture the NALU into the pre-config queue, update any side-data we can
      * extract from it, and configure the codec once we have what we need (or
-     * we've waited long enough).
+     * we've waited long enough). Caller holds [codecLock].
      */
-    private fun bufferForConfig(direct: ByteBuffer, length: Int, ptsUs: Long, isH265: Boolean) {
+    private fun bufferForConfigLocked(direct: ByteBuffer, length: Int, ptsUs: Long, isH265: Boolean) {
         val bytes = ByteArray(length)
         val savedPos = direct.position()
         direct.position(0)
@@ -294,15 +370,19 @@ class VideoPipeline(
         val ready = !isH265 ||
             (pendingWidth != null && (!hdrEnabled || pendingHdrBlob != null)) ||
             pending.size >= MAX_PRECONFIG_SUBMITS
-        if (ready) configureAndFlush()
+        if (ready) configureAndFlushLocked()
     }
 
-    private fun configureAndFlush() {
+    /** Caller holds [codecLock]. `codec`/`codecThread` are null on entry —
+     *  releaseCodecAndThread() detaches both together before any path that
+     *  re-enters pre-configure buffering. */
+    private fun configureAndFlushLocked() {
         width = pendingWidth ?: FHD_W
         height = pendingHeight ?: FHD_H
         val hdrBlob = pendingHdrBlob
 
-        codecThread?.quitSafely()
+        codecGeneration++
+        val generation = codecGeneration
         val thread = HandlerThread("VideoCodec").also { it.start() }
         codecThread = thread
         val handler = Handler(thread.looper)
@@ -312,7 +392,8 @@ class VideoPipeline(
         pacingAnchorNs = 0L
 
         configuredHdrBlob = hdrBlob
-        codec = tryTunneledConfigure(hdrBlob, handler) ?: configureStandard(hdrBlob, handler)
+        codec = tryTunneledConfigure(hdrBlob, handler, generation)
+            ?: configureStandard(hdrBlob, handler, generation)
 
         Log.i(
             TAG,
@@ -364,7 +445,7 @@ class VideoPipeline(
      *    codec error), indicating the feature is present in the codec list but
      *    not actually usable in this configuration.
      */
-    private fun tryTunneledConfigure(hdrBlob: ByteArray?, handler: Handler): MediaCodec? {
+    private fun tryTunneledConfigure(hdrBlob: ByteArray?, handler: Handler, generation: Int): MediaCodec? {
         if (currentMime != MediaFormat.MIMETYPE_VIDEO_HEVC || audioSessionId <= 0) return null
 
         val probeFormat = MediaFormat.createVideoFormat(currentMime, width, height).apply {
@@ -379,26 +460,30 @@ class VideoPipeline(
             setFeatureEnabled(MediaCodecInfo.CodecCapabilities.FEATURE_TunneledPlayback, true)
             setInteger(MediaFormat.KEY_AUDIO_SESSION_ID, audioSessionId)
         }
+        var c: MediaCodec? = null
         return try {
             MediaCodec.createDecoderByType(currentMime).also {
-                it.setCallback(codecCallback, handler)
+                c = it
+                it.setCallback(newCodecCallback(generation), handler)
                 it.configure(format, outputSurface, null, 0)
                 it.start()
                 Log.i(TAG, "Tunneled HEVC active (audioSessionId=$audioSessionId)")
             }
         } catch (e: IllegalStateException) {
             Log.w(TAG, "Tunneled HEVC configure rejected (${e.message}); falling back to non-tunneled")
+            c?.runCatching { release() } // don't leak the half-configured codec
             null
         } catch (e: MediaCodec.CodecException) {
             Log.w(TAG, "Tunneled HEVC configure rejected (${e.diagnosticInfo}); falling back to non-tunneled")
+            c?.runCatching { release() }
             null
         }
     }
 
-    private fun configureStandard(hdrBlob: ByteArray?, handler: Handler): MediaCodec {
+    private fun configureStandard(hdrBlob: ByteArray?, handler: Handler, generation: Int): MediaCodec {
         val format = buildBaseFormat(hdrBlob)
         return MediaCodec.createDecoderByType(currentMime).also {
-            it.setCallback(codecCallback, handler)
+            it.setCallback(newCodecCallback(generation), handler)
             it.configure(format, outputSurface, null, 0)
             it.start()
         }
@@ -415,13 +500,15 @@ class VideoPipeline(
     }
 
     private fun submitToCodec(src: ByteBuffer, length: Int, ptsUs: Long) {
-        val c = codec ?: return
         val bytes = ByteArray(length)
         src.position(0)
         src.get(bytes, 0, length)
         val p = Pending(bytes, ptsUs)
 
         synchronized(codecLock) {
+            // Capture inside the lock so the codec we feed is the same
+            // generation as the freeInputBuffers index we pair it with.
+            val c = codec ?: return
             val idx = freeInputBuffers.removeFirstOrNull()
             if (idx != null) {
                 try {
@@ -516,18 +603,8 @@ class VideoPipeline(
         Log.w(TAG, "Video stall: ${totalSubmits.get()} submitted, " +
             "${totalRenderedFrames.get()} rendered — resetting to pre-configure")
         lastResetTimeMs = now
-        codec?.runCatching { stop(); release() }
-        codec = null
-        codecThread?.quitSafely()
-        codecThread = null
-        synchronized(codecLock) {
-            asyncInput.clear()
-            freeInputBuffers.clear()
-        }
-        pending.clear()
-        pendingWidth = null
-        pendingHeight = null
-        pendingHdrBlob = null
+        releaseCodecAndThread()
+        synchronized(codecLock) { clearPendingLocked() }
         lastOutputTimeMs = now
     }
 
