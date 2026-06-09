@@ -139,6 +139,10 @@ class VideoPipeline(
     // longer enqueue indices afterward.
     private var codecGeneration = 0
 
+    // True while incoming NALUs are discarded after an overflow flush, until
+    // the next keyframe re-anchors the decoder. Guarded by codecLock.
+    private var droppingUntilKeyframe = false
+
     @Volatile private var lastOutputTimeMs: Long = 0L
     @Volatile private var lastResetTimeMs: Long = 0L
 
@@ -285,6 +289,7 @@ class VideoPipeline(
             codecThread = null
             asyncInput.clear()
             freeInputBuffers.clear()
+            droppingUntilKeyframe = false
         }
         oldThread?.let {
             it.quitSafely()
@@ -505,10 +510,18 @@ class VideoPipeline(
         src.get(bytes, 0, length)
         val p = Pending(bytes, ptsUs)
 
+        val isH265 = currentMime == MediaFormat.MIMETYPE_VIDEO_HEVC
         synchronized(codecLock) {
             // Capture inside the lock so the codec we feed is the same
             // generation as the freeInputBuffers index we pair it with.
             val c = codec ?: return
+            if (droppingUntilKeyframe) {
+                if (!containsKeyFrame(bytes, bytes.size, isH265)) {
+                    totalDroppedFrames.incrementAndGet()
+                    return
+                }
+                droppingUntilKeyframe = false
+            }
             val idx = freeInputBuffers.removeFirstOrNull()
             if (idx != null) {
                 try {
@@ -517,11 +530,22 @@ class VideoPipeline(
                     totalDecoderErrors.incrementAndGet()
                     Log.w(TAG, "submit failed: ${t.message}")
                 }
-            } else {
-                if (asyncInput.size > 30) {
-                    asyncInput.removeFirst()
+            } else if (asyncInput.size > 30) {
+                // Dropping a single mid-GOP NALU punches a hole in the
+                // reference chain — the decoder then gets P-frames whose
+                // references never arrived and paints macroblock soup until
+                // the next IDR. On overflow, flush the whole backlog and
+                // discard until a keyframe re-anchors the stream: a brief
+                // freeze instead of visible corruption.
+                totalDroppedFrames.addAndGet(asyncInput.size.toLong())
+                asyncInput.clear()
+                if (containsKeyFrame(bytes, bytes.size, isH265)) {
+                    asyncInput.addLast(p) // restart the GOP from this keyframe
+                } else {
                     totalDroppedFrames.incrementAndGet()
+                    droppingUntilKeyframe = true
                 }
+            } else {
                 asyncInput.addLast(p)
             }
         }
