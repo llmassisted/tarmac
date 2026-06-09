@@ -143,6 +143,12 @@ class VideoPipeline(
     // the next keyframe re-anchors the decoder. Guarded by codecLock.
     private var droppingUntilKeyframe = false
 
+    // Set by onError for recoverable codec errors so the next submit resets
+    // the codec immediately instead of leaving it dead until the stall
+    // detector's >=60-submit / 3s-silence gates fire. The reset must not run
+    // on the codec callback thread (teardown joins it), hence the handoff.
+    @Volatile private var resetRequested = false
+
     @Volatile private var lastOutputTimeMs: Long = 0L
     @Volatile private var lastResetTimeMs: Long = 0L
 
@@ -193,7 +199,13 @@ class VideoPipeline(
         override fun onError(mc: MediaCodec, e: MediaCodec.CodecException) {
             totalDecoderErrors.incrementAndGet()
             Log.e(TAG, "codec error: ${e.diagnosticInfo}")
-            if (!e.isRecoverable) onFatalError?.invoke(e)
+            if (e.isRecoverable) {
+                // Don't sit on a dead codec until the stall detector fires
+                // (multi-second freeze) — ask the next submit to reset now.
+                resetRequested = true
+            } else {
+                onFatalError?.invoke(e)
+            }
         }
         override fun onOutputFormatChanged(mc: MediaCodec, format: MediaFormat) {
             Log.i(TAG, "output format changed: $format")
@@ -618,14 +630,21 @@ class VideoPipeline(
     }
 
     private fun maybeResetOnStall() {
-        val outputTime = lastOutputTimeMs
-        if (outputTime == 0L || totalSubmits.get() < 60) return
         val now = SystemClock.elapsedRealtime()
-        if (now - outputTime < 3_000) return
+        val eager = resetRequested
+        if (!eager) {
+            val outputTime = lastOutputTimeMs
+            if (outputTime == 0L || totalSubmits.get() < 60) return
+            if (now - outputTime < 3_000) return
+        }
+        // Cooldown applies to eager resets too so a codec that errors on
+        // every configure can't thrash through reset loops.
         if (now - lastResetTimeMs < 10_000) return
 
-        Log.w(TAG, "Video stall: ${totalSubmits.get()} submitted, " +
+        Log.w(TAG, (if (eager) "Recoverable codec error" else "Video stall") +
+            ": ${totalSubmits.get()} submitted, " +
             "${totalRenderedFrames.get()} rendered — resetting to pre-configure")
+        resetRequested = false
         lastResetTimeMs = now
         releaseCodecAndThread()
         synchronized(codecLock) { clearPendingLocked() }
