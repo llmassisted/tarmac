@@ -428,8 +428,12 @@ class VideoPipeline(
 
     /** Builds the common MediaFormat keys shared by both tunneled and standard paths. */
     private fun buildBaseFormat(hdrBlob: ByteArray?): MediaFormat {
-        val maxW = if (displaySupports4k) UHD_W else FHD_W
-        val maxH = if (displaySupports4k) UHD_H else FHD_H
+        // The display ceiling is also advertised to the sender, so the SPS
+        // size normally stays within it — but a sender that ignores the hint
+        // (some Retina Macs) must not produce a configure where the picture
+        // size exceeds KEY_MAX_WIDTH/HEIGHT.
+        val maxW = maxOf(width, if (displaySupports4k) UHD_W else FHD_W)
+        val maxH = maxOf(height, if (displaySupports4k) UHD_H else FHD_H)
         return MediaFormat.createVideoFormat(currentMime, width, height).apply {
             setInteger(MediaFormat.KEY_FRAME_RATE, 60)
             setInteger(

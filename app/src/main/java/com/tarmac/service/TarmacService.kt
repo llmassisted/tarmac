@@ -201,6 +201,10 @@ class TarmacService : LifecycleService(), AirPlayJni.Listener {
 
     @Synchronized
     private fun stopAirPlay() {
+        // A fault-restart while ACTIVE tears down without an IDLE session
+        // event, so the IDLE-path release in onSessionState() never fires —
+        // release here too or the lock idles held until its 4h timeout.
+        releaseSessionWakeLock()
         unregisterNetworkCallback()
         lastBonjourArgs = null
         bonjour?.stop()

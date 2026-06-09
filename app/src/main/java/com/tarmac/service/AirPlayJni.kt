@@ -207,8 +207,9 @@ object AirPlayJni {
     }
 
     /**
-     * AAC-ELD / ALAC / PCM audio frame. [compressionType] is UxPlay's
-     * `audio_decode_struct.ct` — 1=ALAC, 2=AAC-LC, 4=AAC-ELD, 8=PCM.
+     * AAC-ELD / ALAC audio frame. [compressionType] is UxPlay's
+     * `audio_decode_struct.ct` — 2=ALAC (spf=352), 8=AAC-ELD (spf=480),
+     * matching native `raop_rtp.c` and [com.tarmac.media.AudioPipeline].
      */
     @Suppress("unused")
     fun onAudioData(direct: ByteBuffer, length: Int, compressionType: Int, ntpTimeLocal: Long) {
